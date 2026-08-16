@@ -4,6 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 
 TARGET_URL = "https://fishing-shop-jh.com/"
+DEFAULT_LOGO_URL = "https://fishing-shop-jh.com/img/logo.png"
 DB_PATH = "products.db"
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
@@ -35,38 +36,41 @@ def save_notified(url):
     conn.close()
 
 def fetch_product_image_url(product_url, headers):
-    """商品・カテゴリ詳細ページからメイン画像を抽出"""
+    """商品・カテゴリ詳細ページからメイン画像を安全に抽出"""
     try:
         res = requests.get(product_url, headers=headers, timeout=10)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
         
         img_url = None
+        # 1. OGP画像を優先取得
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
             img_url = og_img["content"]
         else:
-            img_tag = soup.select_one(".product_image img, .img_box img, #product_image img, .product-img img")
+            # 2. ページ内の商品画像枠タグから探索
+            img_tag = soup.select_one(".product_image img, .img_box img, #product_image img, .product-img img, td img")
             if img_tag and img_tag.get("src"):
                 img_url = requests.compat.urljoin(product_url, img_tag["src"])
         
-        if img_url and img_url.startswith("http://"):
-            img_url = img_url.replace("http://", "https://", 1)
-            
-        return img_url
+        if img_url:
+            # HTTPをHTTPSに自動変換
+            if img_url.startswith("http://"):
+                img_url = img_url.replace("http://", "https://", 1)
+            return img_url
 
     except Exception as e:
         print(f"画像取得エラー ({product_url}): {e}")
     
-    return None
+    # 画像取得失敗時は店舗デフォルトロゴを使用
+    return DEFAULT_LOGO_URL
 
 def send_flex_message(items):
-    """LINE Flex Message (カルーセル) で画像付き通知を配信（最大10件）"""
+    """LINE Flex Message (カルーセル) で画像付き通知を配信（最大10件ずつ分割）"""
     if not LINE_ACCESS_TOKEN:
         print("エラー: LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
-    # LINE APIのカルーセル上限は10件のため、10件ずつに分割して送信
     chunk_size = 10
     for i in range(0, len(items), chunk_size):
         chunk = items[i:i + chunk_size]
@@ -80,7 +84,7 @@ def send_flex_message(items):
         bubbles = []
         for title, product_url, img_url in chunk:
             display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
-            display_img = img_url if img_url else "https://fishing-shop-jh.com/img/logo.png"
+            display_img = img_url if img_url else DEFAULT_LOGO_URL
 
             bubble = {
                 "type": "bubble",
@@ -153,7 +157,6 @@ def get_top_information_items(soup):
     items = []
     seen_urls = set()
 
-    # div.info 内のすべての a タグを取得
     for a_tag in info_div.find_all("a", href=True):
         href = a_tag["href"]
         text = a_tag.get_text(strip=True)
@@ -164,7 +167,6 @@ def get_top_information_items(soup):
                 items.append((text, full_url))
                 seen_urls.add(full_url)
 
-    # 制限を設けず、INFORMATION枠内にある全アイテムを返却
     return items
 
 def main():
