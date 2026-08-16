@@ -71,7 +71,7 @@ def send_flex_message(items):
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
         "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
     }
 
     bubbles = []
@@ -141,34 +141,29 @@ def send_flex_message(items):
         print(f"LINE通知送信失敗: {response.status_code} {response.text}")
 
 def get_top_information_items(soup):
-    """INFORMATION（スクロール枠）の最上部（最新）から指定件数のみを取得"""
-    # marqueeまたはINFORMATIONエリアを取得
-    target_area = soup.find("marquee")
-    if not target_area:
-        for tag in soup.find_all(["div", "td"]):
-            if "INFORMATION" in tag.get_text() and "RECOMMEND" not in tag.get_text():
-                if tag.find("a", href=lambda h: h and "pid=" in h):
-                    target_area = tag
-                    break
-
-    if not target_area:
-        target_area = soup
-
+    """INFORMATION（marquee枠）内のみから最新商品リンクを抽出"""
     items = []
     seen_urls = set()
 
-    # 上から順番（掲載順）に取得
-    for a_tag in target_area.find_all("a", href=True):
+    # INFORMATION枠（marqueeタグ）を直接指定
+    marquee_tag = soup.find("marquee")
+    if not marquee_tag:
+        print("[WARN] marquee タグが見つかりませんでした。")
+        return []
+
+    # marquee内のaタグを上から順に走査
+    for a_tag in marquee_tag.find_all("a", href=True):
         href = a_tag["href"]
         text = a_tag.get_text(strip=True)
         
-        if "pid=" in href and text and len(text) > 2:
+        # 商品詳細ページ（pid=を含むURL）かつテキストが存在するもの
+        if "pid=" in href and text:
             full_url = requests.compat.urljoin(TARGET_URL, href)
             if full_url not in seen_urls:
                 items.append((text, full_url))
                 seen_urls.add(full_url)
 
-    # 過去ログを捨てて、一番上の最新5件だけに限定する
+    # 上から順（最新順）に上位5件を返却
     return items[:5]
 
 def main():
@@ -188,16 +183,20 @@ def main():
         return
 
     top_items = get_top_information_items(soup)
+    print(f"[DEBUG] 取得されたINFORMATION件数: {len(top_items)}件")
+    for idx, (t, u) in enumerate(top_items, 1):
+        print(f"[DEBUG]   {idx}. {t} -> {u}")
 
     if not top_items:
         print("INFORMATION枠内に商品が見つかりませんでした。")
         return
 
-    # 未通知の商品（最新の上から順）
     new_items = []
     for title, url in top_items:
         if not is_notified(url):
             new_items.append((title, url))
+
+    print(f"[DEBUG] 未通知の新規件数: {len(new_items)}件")
 
     if not new_items:
         print("INFORMATION内に新しい未通知商品はありませんでした。")
