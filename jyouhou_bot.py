@@ -35,19 +35,17 @@ def save_notified(url):
     conn.close()
 
 def fetch_product_image_url(product_url, headers):
-    """商品詳細ページからメイン画像を抽出"""
+    """商品・カテゴリ詳細ページからメイン画像を抽出"""
     try:
         res = requests.get(product_url, headers=headers, timeout=10)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
         
         img_url = None
-        # OGP画像を優先取得
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
             img_url = og_img["content"]
         else:
-            # カラーミーショップ標準の商品画像枠
             img_tag = soup.select_one(".product_image img, .img_box img, #product_image img, .product-img img")
             if img_tag and img_tag.get("src"):
                 img_url = requests.compat.urljoin(product_url, img_tag["src"])
@@ -76,7 +74,7 @@ def send_flex_message(items):
 
     bubbles = []
     for title, product_url, img_url in items:
-        display_title = title.strip() if (title and title.strip()) else "新着・再入荷商品"
+        display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
         display_img = img_url if img_url else "https://fishing-shop-jh.com/img/logo.png"
 
         bubble = {
@@ -112,7 +110,7 @@ def send_flex_message(items):
                         "color": "#1DB954",
                         "action": {
                             "type": "uri",
-                            "label": "商品ページを開く",
+                            "label": "ページを開く",
                             "uri": product_url
                         }
                     }
@@ -141,38 +139,29 @@ def send_flex_message(items):
         print(f"LINE通知送信失敗: {response.status_code} {response.text}")
 
 def get_top_information_items(soup):
-    """INFORMATION領域から商品リンク（pid=を含むもの）を最新順に抽出"""
-    # 1. まず marquee タグを探す
-    target_area = soup.find("marquee")
-
-    # 2. marquee タグが無い場合、INFORMATIONを含むブロックの中から商品リンクを持つ最小の要素を特定
-    if not target_area:
-        for tag in soup.find_all(["td", "div", "section"]):
-            text = tag.get_text()
-            if "INFORMATION" in text and "RECOMMEND" not in text:
-                # 該当ブロック内にpid=を含む商品リンクが存在するか確認
-                if tag.find("a", href=lambda h: h and "pid=" in h):
-                    target_area = tag
-                    break
-
-    # 3. それでも見つからない場合はページ全体のaタグから検索
-    if not target_area:
-        target_area = soup
+    """div.info エリアから最新リンクを抽出"""
+    # HTMLの <div class="info"> を直接指定
+    info_div = soup.find("div", class_="info")
+    if not info_div:
+        print("[WARN] div.info が見つかりませんでした。")
+        return []
 
     items = []
     seen_urls = set()
 
-    for a_tag in target_area.find_all("a", href=True):
+    # div.info 内の a タグを上から順に抽出
+    for a_tag in info_div.find_all("a", href=True):
         href = a_tag["href"]
         text = a_tag.get_text(strip=True)
 
-        if "pid=" in href and text and len(text) > 2:
+        # リンクが存在し、テキストがある程度存在するものを抽出
+        if href and text and len(text) > 2:
             full_url = requests.compat.urljoin(TARGET_URL, href)
             if full_url not in seen_urls:
                 items.append((text, full_url))
                 seen_urls.add(full_url)
 
-    # ページ上部（最新順）から上位5件を抽出
+    # 上から順（最新・おすすめ順）に上位5件を返却
     return items[:5]
 
 def main():
