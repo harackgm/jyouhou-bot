@@ -61,86 +61,90 @@ def fetch_product_image_url(product_url, headers):
     return None
 
 def send_flex_message(items):
-    """LINE Flex Message (カルーセル) で画像付き通知を配信"""
+    """LINE Flex Message (カルーセル) で画像付き通知を配信（最大10件）"""
     if not LINE_ACCESS_TOKEN:
         print("エラー: LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
-    url = "https://api.line.me/v2/bot/message/broadcast"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
-    }
+    # LINE APIのカルーセル上限は10件のため、10件ずつに分割して送信
+    chunk_size = 10
+    for i in range(0, len(items), chunk_size):
+        chunk = items[i:i + chunk_size]
 
-    bubbles = []
-    for title, product_url, img_url in items:
-        display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
-        display_img = img_url if img_url else "https://fishing-shop-jh.com/img/logo.png"
-
-        bubble = {
-            "type": "bubble",
-            "hero": {
-                "type": "image",
-                "url": display_img,
-                "size": "full",
-                "aspectRatio": "4:3",
-                "aspectMode": "cover"
-            },
-            "body": {
-                "type": "box",
-                "layout": "vertical",
-                "contents": [
-                    {
-                        "type": "text",
-                        "text": display_title,
-                        "weight": "bold",
-                        "size": "md",
-                        "wrap": True
-                    }
-                ]
-            },
-            "footer": {
-                "type": "box",
-                "layout": "vertical",
-                "spacing": "sm",
-                "contents": [
-                    {
-                        "type": "button",
-                        "style": "primary",
-                        "color": "#1DB954",
-                        "action": {
-                            "type": "uri",
-                            "label": "ページを開く",
-                            "uri": product_url
-                        }
-                    }
-                ]
-            }
+        url = "https://api.line.me/v2/bot/message/broadcast"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
         }
-        bubbles.append(bubble)
 
-    payload = {
-        "messages": [
-            {
-                "type": "flex",
-                "altText": f"城峰釣具店 INFORMATION新着通知 ({len(items)}件)",
-                "contents": {
-                    "type": "carousel",
-                    "contents": bubbles
+        bubbles = []
+        for title, product_url, img_url in chunk:
+            display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
+            display_img = img_url if img_url else "https://fishing-shop-jh.com/img/logo.png"
+
+            bubble = {
+                "type": "bubble",
+                "hero": {
+                    "type": "image",
+                    "url": display_img,
+                    "size": "full",
+                    "aspectRatio": "4:3",
+                    "aspectMode": "cover"
+                },
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": [
+                        {
+                            "type": "text",
+                            "text": display_title,
+                            "weight": "bold",
+                            "size": "md",
+                            "wrap": True
+                        }
+                    ]
+                },
+                "footer": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "style": "primary",
+                            "color": "#1DB954",
+                            "action": {
+                                "type": "uri",
+                                "label": "ページを開く",
+                                "uri": product_url
+                            }
+                        }
+                    ]
                 }
             }
-        ]
-    }
+            bubbles.append(bubble)
 
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code == 200:
-        print("LINE画像付きFlex通知送信成功")
-    else:
-        print(f"LINE通知送信失敗: {response.status_code} {response.text}")
+        payload = {
+            "messages": [
+                {
+                    "type": "flex",
+                    "altText": f"城峰釣具店 INFORMATION新着通知 ({len(chunk)}件)",
+                    "contents": {
+                        "type": "carousel",
+                        "contents": bubbles
+                    }
+                }
+            ]
+        }
+
+        response = requests.post(url, headers=headers, json=payload)
+        if response.status_code == 200:
+            print(f"LINE画像付きFlex通知送信成功 ({len(chunk)}件)")
+        else:
+            print(f"LINE通知送信失敗: {response.status_code} {response.text}")
 
 def get_top_information_items(soup):
-    """div.info エリアから最新リンクを抽出"""
-    # HTMLの <div class="info"> を直接指定
+    """div.info エリアからINFORMATION内の全リンクを抽出"""
     info_div = soup.find("div", class_="info")
     if not info_div:
         print("[WARN] div.info が見つかりませんでした。")
@@ -149,24 +153,23 @@ def get_top_information_items(soup):
     items = []
     seen_urls = set()
 
-    # div.info 内の a タグを上から順に抽出
+    # div.info 内のすべての a タグを取得
     for a_tag in info_div.find_all("a", href=True):
         href = a_tag["href"]
         text = a_tag.get_text(strip=True)
 
-        # リンクが存在し、テキストがある程度存在するものを抽出
         if href and text and len(text) > 2:
             full_url = requests.compat.urljoin(TARGET_URL, href)
             if full_url not in seen_urls:
                 items.append((text, full_url))
                 seen_urls.add(full_url)
 
-    # 上から順（最新・おすすめ順）に上位5件を返却
-    return items[:5]
+    # 制限を設けず、INFORMATION枠内にある全アイテムを返却
+    return items
 
 def main():
     init_db()
-    print("城峰釣具店 (INFORMATION最新5件監視) を開始します...")
+    print("城峰釣具店 (INFORMATION監視) を開始します...")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -180,17 +183,15 @@ def main():
         print(f"Webサイトの取得に失敗しました: {e}")
         return
 
-    top_items = get_top_information_items(soup)
-    print(f"[DEBUG] 取得されたINFORMATION件数: {len(top_items)}件")
-    for idx, (t, u) in enumerate(top_items, 1):
-        print(f"[DEBUG]   {idx}. {t} -> {u}")
+    all_items = get_top_information_items(soup)
+    print(f"[DEBUG] 取得されたINFORMATION全件数: {len(all_items)}件")
 
-    if not top_items:
+    if not all_items:
         print("INFORMATION枠内に商品が見つかりませんでした。")
         return
 
     new_items = []
-    for title, url in top_items:
+    for title, url in all_items:
         if not is_notified(url):
             new_items.append((title, url))
 
