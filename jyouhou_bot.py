@@ -35,29 +35,35 @@ def save_notified(url):
     conn.close()
 
 def fetch_product_image_url(product_url, headers):
-    """商品詳細ページを開き、メイン商品画像のURLを取得する"""
+    """商品詳細ページからメイン画像を抽出"""
     try:
         res = requests.get(product_url, headers=headers, timeout=10)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
         
-        # OGP画像優先
+        img_url = None
+        # OGP画像を優先取得
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
-            return og_img["content"]
+            img_url = og_img["content"]
+        else:
+            # カラーミーショップ標準の商品画像枠
+            img_tag = soup.select_one(".product_image img, .img_box img, #product_image img, .product-img img")
+            if img_tag and img_tag.get("src"):
+                img_url = requests.compat.urljoin(product_url, img_tag["src"])
         
-        # カラーミーショップ標準のメイン商品画像枠
-        img_tag = soup.select_one(".product_image img, .img_box img, #product_image img")
-        if img_tag and img_tag.get("src"):
-            return requests.compat.urljoin(product_url, img_tag["src"])
+        if img_url and img_url.startswith("http://"):
+            img_url = img_url.replace("http://", "https://", 1)
             
+        return img_url
+
     except Exception as e:
         print(f"画像取得エラー ({product_url}): {e}")
     
     return None
 
 def send_flex_message(items):
-    """LINE Messaging API (Flex Message / Carousel) で画像付き通知"""
+    """LINE Flex Message (カルーセル) で画像付き通知を配信"""
     if not LINE_ACCESS_TOKEN:
         print("エラー: LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
@@ -68,10 +74,9 @@ def send_flex_message(items):
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN}"
     }
 
-    # 各商品のカルーセルバブル構築
     bubbles = []
     for title, product_url, img_url in items:
-        # デフォルト画像の設定（万が一画像が取れなかった場合）
+        display_title = title.strip() if (title and title.strip()) else "新着・再入荷商品"
         display_img = img_url if img_url else "https://fishing-shop-jh.com/img/logo.png"
 
         bubble = {
@@ -89,7 +94,7 @@ def send_flex_message(items):
                 "contents": [
                     {
                         "type": "text",
-                        "text": title,
+                        "text": display_title,
                         "weight": "bold",
                         "size": "md",
                         "wrap": True
@@ -116,12 +121,11 @@ def send_flex_message(items):
         }
         bubbles.append(bubble)
 
-    # 送信用ペイロード構築
     payload = {
         "messages": [
             {
                 "type": "flex",
-                "altText": f"城峰釣具店 新着・再入荷通知 ({len(items)}件)",
+                "altText": f"城峰釣具店 INFORMATION新着通知 ({len(items)}件)",
                 "contents": {
                     "type": "carousel",
                     "contents": bubbles
@@ -138,7 +142,7 @@ def send_flex_message(items):
 
 def main():
     init_db()
-    print("城峰釣具店 (INFORMATION) の巡回チェックを開始します...")
+    print("城峰釣具店 (INFORMATION) の厳密巡回チェックを開始します...")
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -153,44 +157,55 @@ def main():
 
     soup = BeautifulSoup(response.text, "html.parser")
     
-    # INFORMATION エリアの探索（カラーミーショップ標準構成に対応）
-    info_area = soup.find(id="top_info") or soup.select_one(".info_box, .information_box, .info_area")
+    # INFORMATIONエリアの特定（スクロール枠/marquee/特定タグを探索）
+    info_area = None
     
-    if not info_area:
-        # INFORMATIONの見出し文字列を探してその親要素を取得
-        for h2 in soup.find_all(["h2", "h3", "div"]):
-            if "INFORMATION" in h2.get_text():
-                info_area = h2.parent
+    # 1. 見出しに「INFORMATION」が含まれるブロックを探す
+    for elem in soup.find_all(["div", "section", "td"]):
+        # 直接の子要素やテキストにINFORMATIONが含まれるか確認
+        if elem.find(string=lambda t: t and "INFORMATION" in t):
+            # その要素の直後の兄弟要素、または内部のスクロールエリア（marquee/div等）を取得
+            marquee = elem.find(["marquee", "ul", "ol", "div"])
+            if marquee:
+                info_area = marquee
                 break
+            info_area = elem
+            break
 
     if not info_area:
-        print("INFORMATIONエリアが見つかりませんでした。トップページ全体から取得します。")
-        info_area = soup
+        print("エラー: INFORMATIONエリアが見つかりませんでした。")
+        return
 
-    keywords = ["NEW", "新入荷", "再入荷", "予約", "ご予約", "販売", "入荷"]
     new_items = []
-
-    # INFORMATION内の全リンクをチェック
+    
+    # INFORMATIONエリア内のリンクのみを取得
     for a_tag in info_area.find_all("a", href=True):
         href = a_tag["href"]
         text = a_tag.get_text(strip=True)
         
-        # キーワードのチェックまたは特定リンク構造の判定
-        if any(kw in text for kw in keywords) or "pid=" in href:
+        # リンクが存在し、トップページ以外の有効な商品リンク
+        if text and href and href != "#" and href != TARGET_URL:
             full_url = requests.compat.urljoin(TARGET_URL, href)
             if not is_notified(full_url):
                 new_items.append((text, full_url))
 
     if not new_items:
-        print("新着・再入荷商品はありませんでした。")
+        print("INFORMATION内に新着・未通知の商品はありませんでした。")
         return
 
-    # LINE Flex Messageは一度に最大10件まで送信可能
-    target_items = new_items[:10]
+    # 重複URLを排除
+    unique_items = []
+    seen_urls = set()
+    for title, url in new_items:
+        if url not in seen_urls:
+            unique_items.append((title, url))
+            seen_urls.add(url)
+
+    target_items = unique_items[:10]
     processed_items = []
 
     for title, url in target_items:
-        print(f"商品画像を取得中: {title}")
+        print(f"INFORMATION対象商品を取得中: {title}")
         img_url = fetch_product_image_url(url, headers)
         processed_items.append((title, url, img_url))
         save_notified(url)
