@@ -141,35 +141,44 @@ def send_flex_message(items):
         print(f"LINE通知送信失敗: {response.status_code} {response.text}")
 
 def get_top_information_items(soup):
-    """INFORMATION（marquee枠）内のみから最新商品リンクを抽出"""
+    """INFORMATION領域から商品リンク（pid=を含むもの）を最新順に抽出"""
+    # 1. まず marquee タグを探す
+    target_area = soup.find("marquee")
+
+    # 2. marquee タグが無い場合、INFORMATIONを含むブロックの中から商品リンクを持つ最小の要素を特定
+    if not target_area:
+        for tag in soup.find_all(["td", "div", "section"]):
+            text = tag.get_text()
+            if "INFORMATION" in text and "RECOMMEND" not in text:
+                # 該当ブロック内にpid=を含む商品リンクが存在するか確認
+                if tag.find("a", href=lambda h: h and "pid=" in h):
+                    target_area = tag
+                    break
+
+    # 3. それでも見つからない場合はページ全体のaタグから検索
+    if not target_area:
+        target_area = soup
+
     items = []
     seen_urls = set()
 
-    # INFORMATION枠（marqueeタグ）を直接指定
-    marquee_tag = soup.find("marquee")
-    if not marquee_tag:
-        print("[WARN] marquee タグが見つかりませんでした。")
-        return []
-
-    # marquee内のaタグを上から順に走査
-    for a_tag in marquee_tag.find_all("a", href=True):
+    for a_tag in target_area.find_all("a", href=True):
         href = a_tag["href"]
         text = a_tag.get_text(strip=True)
-        
-        # 商品詳細ページ（pid=を含むURL）かつテキストが存在するもの
-        if "pid=" in href and text:
+
+        if "pid=" in href and text and len(text) > 2:
             full_url = requests.compat.urljoin(TARGET_URL, href)
             if full_url not in seen_urls:
                 items.append((text, full_url))
                 seen_urls.add(full_url)
 
-    # 上から順（最新順）に上位5件を返却
+    # ページ上部（最新順）から上位5件を抽出
     return items[:5]
 
 def main():
     init_db()
     print("城峰釣具店 (INFORMATION最新5件監視) を開始します...")
-    
+
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
