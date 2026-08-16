@@ -82,8 +82,11 @@ def main():
         print("新着・再入荷商品はありませんでした。")
         return
 
+    # 一度に送信する件数を最大10件に制限して文字数オーバーを防止
+    target_items = new_items[:10]
+
     msg_lines = ["🆕【城峰釣具店 新入荷・再入荷情報】", "━━━━━━━━━━━━━━━━━━"]
-    for title, url in new_items:
+    for title, url in target_items:
         msg_lines.append(f"🎣 {title}\n👉 {url}")
         save_notified(url)
     msg_lines.append("━━━━━━━━━━━━━━━━━━")
