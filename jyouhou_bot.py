@@ -140,78 +140,84 @@ def send_flex_message(items):
     else:
         print(f"LINE通知送信失敗: {response.status_code} {response.text}")
 
-def get_information_soup(headers):
-    """トップページからINFORMATION枠（iframeや専用ブロック）のHTMLを取得"""
-    res = requests.get(TARGET_URL, headers=headers, timeout=10)
-    res.encoding = res.apparent_encoding
-    soup = BeautifulSoup(res.text, "html.parser")
+def get_information_items(soup, headers):
+    """INFORMATIONのスクロール枠内から上から順に（最新順で）商品リンクを取得"""
+    items = []
+    
+    # INFORMATION枠（marquee または特定のスクロールエリア）を探索
+    info_container = soup.find("marquee")
+    
+    if not info_container:
+        # marqueeタグがない場合、INFORMATION表記のあるブロック内のスクロール要素を探す
+        for element in soup.find_all(["div", "td", "section"]):
+            if "INFORMATION" in element.get_text():
+                # 内部にあるリンク付きタグを探索
+                info_container = element
+                break
 
-    # 1. iframe で埋め込まれているかチェック
-    for iframe in soup.find_all("iframe"):
-        src = iframe.get("src", "")
-        if "info" in src or "news" in src or "top" in src:
-            iframe_url = requests.compat.urljoin(TARGET_URL, src)
-            iframe_res = requests.get(iframe_url, headers=headers, timeout=10)
-            iframe_res.encoding = iframe_res.apparent_encoding
-            return BeautifulSoup(iframe_res.text, "html.parser")
+    if not info_container:
+        info_container = soup
 
-    # 2. INFORMATIONというテキストの直後にある marquee または ul/div 領域を探す
-    for h2 in soup.find_all(["h2", "h3", "p", "div"]):
-        if "INFORMATION" in h2.get_text():
-            parent = h2.parent
-            # カテゴリリンクを除外するため、pid= を含むリンクがあるブロックを選択
-            for child in parent.find_all(["marquee", "ul", "ol", "div"]):
-                if child.find("a", href=lambda h: h and "pid=" in h):
-                    return child
-            return parent
-
-    return soup
+    # 上から順に <a> タグを取得
+    for a_tag in info_container.find_all("a", href=True):
+        href = a_tag["href"]
+        text = a_tag.get_text(strip=True)
+        
+        # 商品詳細ページ（pid=を含む）で、テキストが存在するもの
+        if "pid=" in href and text:
+            full_url = requests.compat.urljoin(TARGET_URL, href)
+            # 全体のトップページや無効URLを除外
+            if full_url != TARGET_URL:
+                items.append((text, full_url))
+                
+    return items
 
 def main():
     init_db()
-    print("城峰釣具店 (INFORMATION) の厳密巡回チェックを開始します...")
+    print("城峰釣具店 (INFORMATION上部・最新順) の巡回チェックを開始します...")
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
 
     try:
-        info_soup = get_information_soup(headers)
+        response = requests.get(TARGET_URL, headers=headers, timeout=10)
+        response.encoding = response.apparent_encoding
+        soup = BeautifulSoup(response.text, "html.parser")
     except Exception as e:
         print(f"Webサイトの取得に失敗しました: {e}")
         return
 
-    keywords = ["NEW", "新入荷", "再入荷", "予約", "ご予約", "販売", "入荷"]
+    raw_items = get_information_items(soup, headers)
+
+    if not raw_items:
+        print("INFORMATION枠内に商品が見つかりませんでした。")
+        return
+
+    # 取得順（＝ページの掲載順＝最新順）を維持したまま、重複URLを除外
+    unique_items = []
+    seen_urls = set()
+    for title, url in raw_items:
+        if url not in seen_urls:
+            unique_items.append((title, url))
+            seen_urls.add(url)
+
+    # 未通知の商品のみを抽出（上から順）
     new_items = []
-    
-    # INFORMATIONエリア内で「pid=」（個別商品ページ）を含むリンクのみを厳密抽出
-    for a_tag in info_soup.find_all("a", href=True):
-        href = a_tag["href"]
-        text = a_tag.get_text(strip=True)
-        
-        # 個別商品リンク（pid= を含む）かつ カテゴリ等のトップ用キーワードでないもの
-        if "pid=" in href and text and not text.startswith("http"):
-            full_url = requests.compat.urljoin(TARGET_URL, href)
-            if not is_notified(full_url):
-                new_items.append((text, full_url))
+    for title, url in unique_items:
+        if not is_notified(url):
+            new_items.append((title, url))
 
     if not new_items:
         print("INFORMATION内に新着・未通知の商品はありませんでした。")
         return
 
-    # 重複URLを排除
-    unique_items = []
-    seen_urls = set()
-    for title, url in new_items:
-        if url not in seen_urls:
-            unique_items.append((title, url))
-            seen_urls.add(url)
-
-    target_items = unique_items[:10]
+    # 最新の上位10件を対象
+    target_items = new_items[:10]
     processed_items = []
 
     for title, url in target_items:
-        print(f"INFORMATION対象商品を取得中: {title}")
+        print(f"INFORMATION最新商品を取得中: {title}")
         img_url = fetch_product_image_url(url, headers)
         processed_items.append((title, url, img_url))
         save_notified(url)
