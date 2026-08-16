@@ -140,32 +140,34 @@ def send_flex_message(items):
     else:
         print(f"LINE通知送信失敗: {response.status_code} {response.text}")
 
-def get_information_items(soup):
-    """INFORMATIONのスクロール枠内から厳密に掲載順（上から順）でリンクを取得"""
+def get_information_items_strictly(soup):
+    """INFORMATION（スクロール枠）のみにピンポイントで絞り込み"""
     items = []
     
-    # INFORMATIONエリアの特定（marqueeタグ優先）
-    container = soup.find("marquee")
-    if not container:
-        container = soup.find(id="top_info")
-        
-    if not container:
-        # INFORMATION表記の見出し周辺から取得
-        for h in soup.find_all(["h2", "h3", "div"]):
-            if "INFORMATION" in h.get_text():
-                container = h.find_parent("div")
-                break
+    # 1. marquee タグを最優先検索
+    info_area = soup.find("marquee")
+    
+    # 2. marquee がない場合、"INFORMATION" 直後のテーブル/スクロール枠をピンポイント取得
+    if not info_area:
+        for tag in soup.find_all(["td", "div"]):
+            # おすすめ商品やRECOMMENDの要素は除外
+            if "INFORMATION" in tag.get_text() and "RECOMMEND" not in tag.get_text():
+                # 内部に pid= リンクがあればその領域を採用
+                if tag.find("a", href=lambda h: h and "pid=" in h):
+                    info_area = tag
+                    break
 
-    if not container:
-        container = soup
+    if not info_area:
+        print("警告: INFORMATION エリアを特定できませんでした。")
+        return []
 
-    # container直下の a タグを登場順通りにチェック
-    for a_tag in container.find_all("a", href=True):
+    # エリア内の a タグ（商品リンク）を上から順番に取得
+    for a_tag in info_area.find_all("a", href=True):
         href = a_tag["href"]
         text = a_tag.get_text(strip=True)
         
-        # 商品詳細ページ（pid=を含む）で、テキストが存在するもの
-        if "pid=" in href and text:
+        # 商品リンクかつ、テキストが存在し「おすすめ」等の見出しでないもの
+        if "pid=" in href and text and len(text) > 2:
             full_url = requests.compat.urljoin(TARGET_URL, href)
             items.append((text, full_url))
 
@@ -173,7 +175,7 @@ def get_information_items(soup):
 
 def main():
     init_db()
-    print("城峰釣具店 (INFORMATION最新順) の巡回チェックを開始します...")
+    print("城峰釣具店 (INFORMATIONピンポイント巡回) を開始します...")
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -187,13 +189,13 @@ def main():
         print(f"Webサイトの取得に失敗しました: {e}")
         return
 
-    raw_items = get_information_items(soup)
+    raw_items = get_information_items_strictly(soup)
 
     if not raw_items:
-        print("INFORMATION枠内に商品が見つかりませんでした。")
+        print("INFORMATION枠内に新着商品が見つかりませんでした。")
         return
 
-    # 登場順（上からの並び順）を保ちつつ重複を除外
+    # 上からの掲載順を保ちつつ重複を除外
     unique_items = []
     seen_urls = set()
     for title, url in raw_items:
@@ -201,22 +203,22 @@ def main():
             unique_items.append((title, url))
             seen_urls.add(url)
 
-    # 上から順（＝最新順）に未通知のものだけを抽出
+    # 未通知の商品（最新の上から順）
     new_items = []
     for title, url in unique_items:
         if not is_notified(url):
             new_items.append((title, url))
 
     if not new_items:
-        print("INFORMATION内に新着・未通知の商品はありませんでした。")
+        print("INFORMATION内に未通知の商品はありませんでした。")
         return
 
-    # 最上部の最新10件をピックアップ
+    # 上部10件
     target_items = new_items[:10]
     processed_items = []
 
     for title, url in target_items:
-        print(f"INFORMATION最新商品を取得中: {title}")
+        print(f"INFORMATION対象商品を取得中: {title}")
         img_url = fetch_product_image_url(url, headers)
         processed_items.append((title, url, img_url))
         save_notified(url)
