@@ -53,7 +53,7 @@ def send_line_notification(message):
 
 def main():
     init_db()
-    print("城峰釣具店の巡回チェックを開始します...")
+    print("城峰釣具店の巡回チェックを開始します（テスト実行中）...")
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -69,11 +69,11 @@ def main():
     soup = BeautifulSoup(response.text, "html.parser")
     new_items = []
     
-    keywords = ["NEW", "新入荷", "再入荷", "予約", "ご予約", "販売", "入荷"]
+    # テスト送信のためキーワード条件を外し、テキストが存在するリンクを検出
     for a_tag in soup.find_all("a", href=True):
         href = a_tag["href"]
         text = a_tag.get_text(strip=True)
-        if any(kw in text for kw in keywords):
+        if text:
             full_url = requests.compat.urljoin(TARGET_URL, href)
             if not is_notified(full_url):
                 new_items.append((text, full_url))
@@ -82,10 +82,10 @@ def main():
         print("新着・再入荷商品はありませんでした。")
         return
 
-    # 一度に送信する件数を最大10件に制限して文字数オーバーを防止
+    # 一度に送信する件数を最大10件に制限
     target_items = new_items[:10]
 
-    msg_lines = ["🆕【城峰釣具店 新入荷・再入荷情報】", "━━━━━━━━━━━━━━━━━━"]
+    msg_lines = ["🧪【城峰釣具店Bot テスト通知】", "━━━━━━━━━━━━━━━━━━"]
     for title, url in target_items:
         msg_lines.append(f"🎣 {title}\n👉 {url}")
         save_notified(url)
