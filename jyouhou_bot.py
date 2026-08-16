@@ -140,41 +140,40 @@ def send_flex_message(items):
     else:
         print(f"LINE通知送信失敗: {response.status_code} {response.text}")
 
-def get_information_items(soup, headers):
-    """INFORMATIONのスクロール枠内から上から順に（最新順で）商品リンクを取得"""
+def get_information_items(soup):
+    """INFORMATIONのスクロール枠内から厳密に掲載順（上から順）でリンクを取得"""
     items = []
     
-    # INFORMATION枠（marquee または特定のスクロールエリア）を探索
-    info_container = soup.find("marquee")
-    
-    if not info_container:
-        # marqueeタグがない場合、INFORMATION表記のあるブロック内のスクロール要素を探す
-        for element in soup.find_all(["div", "td", "section"]):
-            if "INFORMATION" in element.get_text():
-                # 内部にあるリンク付きタグを探索
-                info_container = element
+    # INFORMATIONエリアの特定（marqueeタグ優先）
+    container = soup.find("marquee")
+    if not container:
+        container = soup.find(id="top_info")
+        
+    if not container:
+        # INFORMATION表記の見出し周辺から取得
+        for h in soup.find_all(["h2", "h3", "div"]):
+            if "INFORMATION" in h.get_text():
+                container = h.find_parent("div")
                 break
 
-    if not info_container:
-        info_container = soup
+    if not container:
+        container = soup
 
-    # 上から順に <a> タグを取得
-    for a_tag in info_container.find_all("a", href=True):
+    # container直下の a タグを登場順通りにチェック
+    for a_tag in container.find_all("a", href=True):
         href = a_tag["href"]
         text = a_tag.get_text(strip=True)
         
         # 商品詳細ページ（pid=を含む）で、テキストが存在するもの
         if "pid=" in href and text:
             full_url = requests.compat.urljoin(TARGET_URL, href)
-            # 全体のトップページや無効URLを除外
-            if full_url != TARGET_URL:
-                items.append((text, full_url))
-                
+            items.append((text, full_url))
+
     return items
 
 def main():
     init_db()
-    print("城峰釣具店 (INFORMATION上部・最新順) の巡回チェックを開始します...")
+    print("城峰釣具店 (INFORMATION最新順) の巡回チェックを開始します...")
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -188,13 +187,13 @@ def main():
         print(f"Webサイトの取得に失敗しました: {e}")
         return
 
-    raw_items = get_information_items(soup, headers)
+    raw_items = get_information_items(soup)
 
     if not raw_items:
         print("INFORMATION枠内に商品が見つかりませんでした。")
         return
 
-    # 取得順（＝ページの掲載順＝最新順）を維持したまま、重複URLを除外
+    # 登場順（上からの並び順）を保ちつつ重複を除外
     unique_items = []
     seen_urls = set()
     for title, url in raw_items:
@@ -202,7 +201,7 @@ def main():
             unique_items.append((title, url))
             seen_urls.add(url)
 
-    # 未通知の商品のみを抽出（上から順）
+    # 上から順（＝最新順）に未通知のものだけを抽出
     new_items = []
     for title, url in unique_items:
         if not is_notified(url):
@@ -212,7 +211,7 @@ def main():
         print("INFORMATION内に新着・未通知の商品はありませんでした。")
         return
 
-    # 最新の上位10件を対象
+    # 最上部の最新10件をピックアップ
     target_items = new_items[:10]
     processed_items = []
 
