@@ -140,6 +140,33 @@ def send_flex_message(items):
     else:
         print(f"LINE通知送信失敗: {response.status_code} {response.text}")
 
+def get_information_soup(headers):
+    """トップページからINFORMATION枠（iframeや専用ブロック）のHTMLを取得"""
+    res = requests.get(TARGET_URL, headers=headers, timeout=10)
+    res.encoding = res.apparent_encoding
+    soup = BeautifulSoup(res.text, "html.parser")
+
+    # 1. iframe で埋め込まれているかチェック
+    for iframe in soup.find_all("iframe"):
+        src = iframe.get("src", "")
+        if "info" in src or "news" in src or "top" in src:
+            iframe_url = requests.compat.urljoin(TARGET_URL, src)
+            iframe_res = requests.get(iframe_url, headers=headers, timeout=10)
+            iframe_res.encoding = iframe_res.apparent_encoding
+            return BeautifulSoup(iframe_res.text, "html.parser")
+
+    # 2. INFORMATIONというテキストの直後にある marquee または ul/div 領域を探す
+    for h2 in soup.find_all(["h2", "h3", "p", "div"]):
+        if "INFORMATION" in h2.get_text():
+            parent = h2.parent
+            # カテゴリリンクを除外するため、pid= を含むリンクがあるブロックを選択
+            for child in parent.find_all(["marquee", "ul", "ol", "div"]):
+                if child.find("a", href=lambda h: h and "pid=" in h):
+                    return child
+            return parent
+
+    return soup
+
 def main():
     init_db()
     print("城峰釣具店 (INFORMATION) の厳密巡回チェックを開始します...")
@@ -149,42 +176,21 @@ def main():
     }
 
     try:
-        response = requests.get(TARGET_URL, headers=headers, timeout=10)
-        response.encoding = response.apparent_encoding
+        info_soup = get_information_soup(headers)
     except Exception as e:
         print(f"Webサイトの取得に失敗しました: {e}")
         return
 
-    soup = BeautifulSoup(response.text, "html.parser")
-    
-    # INFORMATIONエリアの特定（スクロール枠/marquee/特定タグを探索）
-    info_area = None
-    
-    # 1. 見出しに「INFORMATION」が含まれるブロックを探す
-    for elem in soup.find_all(["div", "section", "td"]):
-        # 直接の子要素やテキストにINFORMATIONが含まれるか確認
-        if elem.find(string=lambda t: t and "INFORMATION" in t):
-            # その要素の直後の兄弟要素、または内部のスクロールエリア（marquee/div等）を取得
-            marquee = elem.find(["marquee", "ul", "ol", "div"])
-            if marquee:
-                info_area = marquee
-                break
-            info_area = elem
-            break
-
-    if not info_area:
-        print("エラー: INFORMATIONエリアが見つかりませんでした。")
-        return
-
+    keywords = ["NEW", "新入荷", "再入荷", "予約", "ご予約", "販売", "入荷"]
     new_items = []
     
-    # INFORMATIONエリア内のリンクのみを取得
-    for a_tag in info_area.find_all("a", href=True):
+    # INFORMATIONエリア内で「pid=」（個別商品ページ）を含むリンクのみを厳密抽出
+    for a_tag in info_soup.find_all("a", href=True):
         href = a_tag["href"]
         text = a_tag.get_text(strip=True)
         
-        # リンクが存在し、トップページ以外の有効な商品リンク
-        if text and href and href != "#" and href != TARGET_URL:
+        # 個別商品リンク（pid= を含む）かつ カテゴリ等のトップ用キーワードでないもの
+        if "pid=" in href and text and not text.startswith("http"):
             full_url = requests.compat.urljoin(TARGET_URL, href)
             if not is_notified(full_url):
                 new_items.append((text, full_url))
