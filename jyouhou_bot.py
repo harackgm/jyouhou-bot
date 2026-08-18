@@ -35,34 +35,55 @@ def save_notified(url):
     conn.commit()
     conn.close()
 
-def fetch_product_image_url(product_url, headers):
-    """商品・カテゴリ詳細ページからメイン画像を安全に抽出"""
+def fetch_product_image_url(target_url, headers):
+    """商品詳細ページおよびカテゴリ一覧ページから最適な画像を安全に抽出"""
     try:
-        res = requests.get(product_url, headers=headers, timeout=10)
+        res = requests.get(target_url, headers=headers, timeout=10)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
         
         img_url = None
-        # 1. OGP画像を優先取得
+
+        # 1. OGP画像 (og:image) を優先取得
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
-            img_url = og_img["content"]
-        else:
-            # 2. ページ内の商品画像枠タグから探索
-            img_tag = soup.select_one(".product_image img, .img_box img, #product_image img, .product-img img, td img")
+            content = og_img["content"]
+            # デフォルトロゴ以外の固有画像であれば採用
+            if "logo" not in content.lower():
+                img_url = content
+
+        # 2. 商品詳細ページのメイン画像枠から検索
+        if not img_url:
+            img_tag = soup.select_one(".product_image img, .img_box img, #product_image img, .product-img img")
             if img_tag and img_tag.get("src"):
-                img_url = requests.compat.urljoin(product_url, img_tag["src"])
-        
+                img_url = requests.compat.urljoin(target_url, img_tag["src"])
+
+        # 3. カテゴリ・一覧ページの場合：ページ内にある最初の「商品一覧サムネイル画像」を取得
+        if not img_url:
+            # カラーミーショップ等の一覧用画像セレクター
+            list_img_tag = soup.select_one(".product_list img, .item_list img, .product_data img, table.product img, .info_detail img")
+            if list_img_tag and list_img_tag.get("src"):
+                img_url = requests.compat.urljoin(target_url, list_img_tag["src"])
+
+        # 4. それでも見つからない場合：ページ内の「upload」や「product」を含む最初のimgタグを探す
+        if not img_url:
+            for img in soup.find_all("img", src=True):
+                src = img["src"]
+                if "upload" in src or "product" in src or "shop" in src:
+                    if "logo" not in src.lower() and "icon" not in src.lower():
+                        img_url = requests.compat.urljoin(target_url, src)
+                        break
+
+        # 画像URLが補正できたらHTTPS化して返却
         if img_url:
-            # HTTPをHTTPSに自動変換
             if img_url.startswith("http://"):
                 img_url = img_url.replace("http://", "https://", 1)
             return img_url
 
     except Exception as e:
-        print(f"画像取得エラー ({product_url}): {e}")
+        print(f"画像取得エラー ({target_url}): {e}")
     
-    # 画像取得失敗時は店舗デフォルトロゴを使用
+    # 最終的に画像が見つからない場合は店舗ロゴを使用
     return DEFAULT_LOGO_URL
 
 def send_flex_message(items):
@@ -208,6 +229,7 @@ def main():
     for title, url in new_items:
         print(f"新着商品処理中: {title}")
         img_url = fetch_product_image_url(url, headers)
+        print(f" -> 取得画像URL: {img_url}")
         processed_items.append((title, url, img_url))
         save_notified(url)
 
