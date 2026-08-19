@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import hashlib
 import requests
 from bs4 import BeautifulSoup
 
@@ -8,30 +9,66 @@ DEFAULT_LOGO_URL = "https://fishing-shop-jh.com/img/logo.png"
 DB_PATH = "products.db"
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
+def generate_item_key(title, url):
+    """タイトルとURLの組み合わせから一意の識別キーを生成"""
+    raw_str = f"{title.strip()}_{url.strip()}"
+    return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
+
 def init_db():
+    """DBの初期化および旧テーブル（URL単体キー）からのテーブル移行"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS notified_products (
-            url TEXT PRIMARY KEY,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    ''')
-    conn.commit()
+    
+    # 旧テーブルの存在確認と構造変更（アプローチAへの自動移行）
+    cursor.execute("PRAGMA table_info(notified_products)")
+    columns = [col[1] for col in cursor.fetchall()]
+    
+    if columns and "item_key" not in columns:
+        # 旧テーブルが存在する場合、テーブル名を変更して新構造で再作成
+        cursor.execute("ALTER TABLE notified_products RENAME TO old_notified_products")
+        cursor.execute('''
+            CREATE TABLE notified_products (
+                item_key TEXT PRIMARY KEY,
+                url TEXT,
+                title TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        # 旧データの移行（念のためURLをキーにして引き継ぎ）
+        cursor.execute('''
+            INSERT OR IGNORE INTO notified_products (item_key, url, title)
+            SELECT url, url, 'OLD_DATA' FROM old_notified_products
+        ''')
+        cursor.execute("DROP TABLE old_notified_products")
+        conn.commit()
+    else:
+        # 新規作成
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS notified_products (
+                item_key TEXT PRIMARY KEY,
+                url TEXT,
+                title TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        conn.commit()
+        
     conn.close()
 
-def is_notified(url):
+def is_notified(item_key):
+    """タイトル＋URLのペアキーで既読判定"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT 1 FROM notified_products WHERE url = ?', (url,))
+    cursor.execute('SELECT 1 FROM notified_products WHERE item_key = ?', (item_key,))
     result = cursor.fetchone()
     conn.close()
     return result is not None
 
-def save_notified(url):
+def save_notified(item_key, title, url):
+    """通知済みとしてDBに保存"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('INSERT OR IGNORE INTO notified_products (url) VALUES (?)', (url,))
+    cursor.execute('INSERT OR IGNORE INTO notified_products (item_key, title, url) VALUES (?, ?, ?)', (item_key, title, url))
     conn.commit()
     conn.close()
 
@@ -71,7 +108,7 @@ def fetch_product_image_url(target_url, headers):
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # 1. 直接商品詳細ページだった場合（pid=等を含むURL）
+        # 1. 直接商品詳細ページだった場合
         img_url = extract_image_from_detail_page(target_url, headers)
         if img_url:
             if img_url.startswith("http://"):
@@ -185,7 +222,7 @@ def get_top_information_items(soup):
         return []
 
     items = []
-    seen_urls = set()
+    seen_keys = set()
 
     for a_tag in info_div.find_all("a", href=True):
         href = a_tag["href"]
@@ -193,9 +230,11 @@ def get_top_information_items(soup):
 
         if href and text and len(text) > 2:
             full_url = requests.compat.urljoin(TARGET_URL, href)
-            if full_url not in seen_urls:
-                items.append((text, full_url))
-                seen_urls.add(full_url)
+            item_key = generate_item_key(text, full_url)
+            
+            if item_key not in seen_keys:
+                items.append((text, full_url, item_key))
+                seen_keys.add(item_key)
 
     return items
 
@@ -209,7 +248,7 @@ def main():
 
     try:
         response = requests.get(TARGET_URL, headers=headers, timeout=10)
-        response.encoding = response.apparent_encoding
+        response.encoding = res_encoding = response.apparent_encoding
         soup = BeautifulSoup(response.text, "html.parser")
     except Exception as e:
         print(f"Webサイトの取得に失敗しました: {e}")
@@ -223,9 +262,9 @@ def main():
         return
 
     new_items = []
-    for title, url in all_items:
-        if not is_notified(url):
-            new_items.append((title, url))
+    for title, url, item_key in all_items:
+        if not is_notified(item_key):
+            new_items.append((title, url, item_key))
 
     print(f"[DEBUG] 未通知の新規件数: {len(new_items)}件")
 
@@ -235,12 +274,12 @@ def main():
 
     processed_items = []
 
-    for title, url in new_items:
+    for title, url, item_key in new_items:
         print(f"新着商品処理中: {title}")
         img_url = fetch_product_image_url(url, headers)
         print(f" -> 最終決定画像URL: {img_url}")
         processed_items.append((title, url, img_url))
-        save_notified(url)
+        save_notified(item_key, title, url)
 
     send_flex_message(processed_items)
 
