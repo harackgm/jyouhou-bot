@@ -19,12 +19,10 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # 旧テーブルの存在確認と構造変更（アプローチAへの自動移行）
     cursor.execute("PRAGMA table_info(notified_products)")
     columns = [col[1] for col in cursor.fetchall()]
     
     if columns and "item_key" not in columns:
-        # 旧テーブルが存在する場合、テーブル名を変更して新構造で再作成
         cursor.execute("ALTER TABLE notified_products RENAME TO old_notified_products")
         cursor.execute('''
             CREATE TABLE notified_products (
@@ -34,15 +32,9 @@ def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        # 旧データの移行（念のためURLをキーにして引き継ぎ）
-        cursor.execute('''
-            INSERT OR IGNORE INTO notified_products (item_key, url, title)
-            SELECT url, url, 'OLD_DATA' FROM old_notified_products
-        ''')
         cursor.execute("DROP TABLE old_notified_products")
         conn.commit()
     else:
-        # 新規作成
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS notified_products (
                 item_key TEXT PRIMARY KEY,
@@ -55,6 +47,15 @@ def init_db():
         
     conn.close()
 
+def get_db_count():
+    """DB内の総件数を取得"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT COUNT(*) FROM notified_products')
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
 def is_notified(item_key):
     """タイトル＋URLのペアキーで既読判定"""
     conn = sqlite3.connect(DB_PATH)
@@ -64,8 +65,17 @@ def is_notified(item_key):
     conn.close()
     return result is not None
 
+def save_notified_bulk(items):
+    """複数件を一括でDBに保存"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.executemany('INSERT OR IGNORE INTO notified_products (item_key, title, url) VALUES (?, ?, ?)',
+                       [(item_key, title, url) for title, url, item_key in items])
+    conn.commit()
+    conn.close()
+
 def save_notified(item_key, title, url):
-    """通知済みとしてDBに保存"""
+    """単件を通知済みとしてDBに保存"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('INSERT OR IGNORE INTO notified_products (item_key, title, url) VALUES (?, ?, ?)', (item_key, title, url))
@@ -79,19 +89,16 @@ def extract_image_from_detail_page(detail_url, headers):
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # OGP画像優先
         og_img = soup.find("meta", property="og:image")
         if og_img and og_img.get("content"):
             content = og_img["content"]
             if "logo" not in content.lower() and "icon" not in content.lower():
                 return content
 
-        # 商品メイン画像枠
         img_tag = soup.select_one(".product_image img, .img_box img, #product_image img, .product-img img")
         if img_tag and img_tag.get("src"):
             return requests.compat.urljoin(detail_url, img_tag["src"])
 
-        # ページ内の最初の商品画像を探索（SNSアイコン除外）
         for img in soup.find_all("img", src=True):
             src = img["src"].lower()
             if any(k in src for k in ["upload", "product", "goods", "item"]):
@@ -108,14 +115,12 @@ def fetch_product_image_url(target_url, headers):
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # 1. 直接商品詳細ページだった場合
         img_url = extract_image_from_detail_page(target_url, headers)
         if img_url:
             if img_url.startswith("http://"):
                 img_url = img_url.replace("http://", "https://", 1)
             return img_url
 
-        # 2. カテゴリ一覧ページ（1階層下）だった場合：最初の商品リンクを探して2階層下へ潜る
         first_product_a = soup.select_one(".product_list a, .item_list a, .product_data a, table.product a, .info_detail a, a[href*='pid=']")
         if first_product_a and first_product_a.get("href"):
             deep_url = requests.compat.urljoin(target_url, first_product_a["href"])
@@ -129,7 +134,6 @@ def fetch_product_image_url(target_url, headers):
     except Exception as e:
         print(f"画像検索巡回エラー ({target_url}): {e}")
 
-    # 見つからない場合はデフォルトロゴ
     return DEFAULT_LOGO_URL
 
 def send_flex_message(items):
@@ -248,7 +252,7 @@ def main():
 
     try:
         response = requests.get(TARGET_URL, headers=headers, timeout=10)
-        response.encoding = res_encoding = response.apparent_encoding
+        response.encoding = response.apparent_encoding
         soup = BeautifulSoup(response.text, "html.parser")
     except Exception as e:
         print(f"Webサイトの取得に失敗しました: {e}")
@@ -259,6 +263,13 @@ def main():
 
     if not all_items:
         print("INFORMATION枠内に商品が見つかりませんでした。")
+        return
+
+    # 初回移行（DB件数0件）の場合は全件を一括既読登録して終了する
+    if get_db_count() == 0:
+        print(f"[INFO] 初回データベース初期化: 現存する{len(all_items)}件を既読登録します。")
+        save_notified_bulk(all_items)
+        print("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
         return
 
     new_items = []
