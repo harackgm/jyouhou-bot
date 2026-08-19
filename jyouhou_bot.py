@@ -35,59 +35,68 @@ def save_notified(url):
     conn.commit()
     conn.close()
 
+def extract_image_from_detail_page(detail_url, headers):
+    """商品詳細ページ（2階層下）からルアーのメイン画像を直接抽出"""
+    try:
+        res = requests.get(detail_url, headers=headers, timeout=10)
+        res.encoding = res.apparent_encoding
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        # OGP画像優先
+        og_img = soup.find("meta", property="og:image")
+        if og_img and og_img.get("content"):
+            content = og_img["content"]
+            if "logo" not in content.lower() and "icon" not in content.lower():
+                return content
+
+        # 商品メイン画像枠
+        img_tag = soup.select_one(".product_image img, .img_box img, #product_image img, .product-img img")
+        if img_tag and img_tag.get("src"):
+            return requests.compat.urljoin(detail_url, img_tag["src"])
+
+        # ページ内の最初の商品画像を探索（SNSアイコン除外）
+        for img in soup.find_all("img", src=True):
+            src = img["src"].lower()
+            if any(k in src for k in ["upload", "product", "goods", "item"]):
+                if not any(k in src for k in ["logo", "icon", "banner", "instagram", "facebook", "twitter", "line"]):
+                    return requests.compat.urljoin(detail_url, img["src"])
+    except Exception as e:
+        print(f"詳細ページ画像取得エラー ({detail_url}): {e}")
+    return None
+
 def fetch_product_image_url(target_url, headers):
-    """商品詳細ページおよびカテゴリ一覧ページから最適な画像を安全に抽出"""
+    """1階層下がカテゴリ一覧の場合は、2階層下の個別商品ページへ潜って画像を確定取得"""
     try:
         res = requests.get(target_url, headers=headers, timeout=10)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
-        
-        img_url = None
 
-        # 1. OGP画像 (og:image) を優先取得
-        og_img = soup.find("meta", property="og:image")
-        if og_img and og_img.get("content"):
-            content = og_img["content"]
-            # デフォルトロゴ以外の固有画像であれば採用
-            if "logo" not in content.lower():
-                img_url = content
-
-        # 2. 商品詳細ページのメイン画像枠から検索
-        if not img_url:
-            img_tag = soup.select_one(".product_image img, .img_box img, #product_image img, .product-img img")
-            if img_tag and img_tag.get("src"):
-                img_url = requests.compat.urljoin(target_url, img_tag["src"])
-
-        # 3. カテゴリ・一覧ページの場合：ページ内にある最初の「商品一覧サムネイル画像」を取得
-        if not img_url:
-            # カラーミーショップ等の一覧用画像セレクター
-            list_img_tag = soup.select_one(".product_list img, .item_list img, .product_data img, table.product img, .info_detail img")
-            if list_img_tag and list_img_tag.get("src"):
-                img_url = requests.compat.urljoin(target_url, list_img_tag["src"])
-
-        # 4. それでも見つからない場合：ページ内の「upload」や「product」を含む最初のimgタグを探す
-        if not img_url:
-            for img in soup.find_all("img", src=True):
-                src = img["src"]
-                if "upload" in src or "product" in src or "shop" in src:
-                    if "logo" not in src.lower() and "icon" not in src.lower():
-                        img_url = requests.compat.urljoin(target_url, src)
-                        break
-
-        # 画像URLが補正できたらHTTPS化して返却
+        # 1. 直接商品詳細ページだった場合（pid=等を含むURL）
+        img_url = extract_image_from_detail_page(target_url, headers)
         if img_url:
             if img_url.startswith("http://"):
                 img_url = img_url.replace("http://", "https://", 1)
             return img_url
 
+        # 2. カテゴリ一覧ページ（1階層下）だった場合：最初の商品リンクを探して2階層下へ潜る
+        first_product_a = soup.select_one(".product_list a, .item_list a, .product_data a, table.product a, .info_detail a, a[href*='pid=']")
+        if first_product_a and first_product_a.get("href"):
+            deep_url = requests.compat.urljoin(target_url, first_product_a["href"])
+            print(f" -> 2階層下の個別商品ページへ移動: {deep_url}")
+            img_url = extract_image_from_detail_page(deep_url, headers)
+            if img_url:
+                if img_url.startswith("http://"):
+                    img_url = img_url.replace("http://", "https://", 1)
+                return img_url
+
     except Exception as e:
-        print(f"画像取得エラー ({target_url}): {e}")
-    
-    # 最終的に画像が見つからない場合は店舗ロゴを使用
+        print(f"画像検索巡回エラー ({target_url}): {e}")
+
+    # 見つからない場合はデフォルトロゴ
     return DEFAULT_LOGO_URL
 
 def send_flex_message(items):
-    """LINE Flex Message (カルーセル) で画像付き通知を配信（最大10件ずつ分割）"""
+    """LINE Flex Message (カルーセル) で配信（最大10件ずつ分割）"""
     if not LINE_ACCESS_TOKEN:
         print("エラー: LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
@@ -229,7 +238,7 @@ def main():
     for title, url in new_items:
         print(f"新着商品処理中: {title}")
         img_url = fetch_product_image_url(url, headers)
-        print(f" -> 取得画像URL: {img_url}")
+        print(f" -> 最終決定画像URL: {img_url}")
         processed_items.append((title, url, img_url))
         save_notified(url)
 
