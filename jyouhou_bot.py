@@ -82,6 +82,26 @@ def save_notified(item_key, title, url):
     conn.commit()
     conn.close()
 
+def clean_image_url(raw_url):
+    """PC版LINE対策：URLを完璧なHTTPS形式かつ高解像度URLに整える"""
+    if not raw_url:
+        return DEFAULT_LOGO_URL
+
+    # プロトコル補正
+    if raw_url.startswith("//"):
+        raw_url = "https:" + raw_url
+    elif raw_url.startswith("http://"):
+        raw_url = raw_url.replace("http://", "https://", 1)
+
+    # クエリパラメータ(?以降)を排除
+    clean_url = raw_url.split('?')[0]
+
+    # サムネイル画像(_th)の指定があれば除去して拡大画像URLにする
+    if "_th." in clean_url:
+        clean_url = clean_url.replace("_th.", ".")
+
+    return clean_url
+
 def extract_image_from_detail_page(detail_url, headers):
     """商品詳細ページ（2階層下）からルアーのメイン画像を直接抽出"""
     try:
@@ -117,10 +137,7 @@ def fetch_product_image_url(target_url, headers):
 
         img_url = extract_image_from_detail_page(target_url, headers)
         if img_url:
-            if img_url.startswith("http://"):
-                img_url = img_url.replace("http://", "https://", 1)
-            # PC版LINE対策：末尾のクエリパラメータ(?以降)を除去
-            return img_url.split('?')[0]
+            return clean_image_url(img_url)
 
         first_product_a = soup.select_one(".product_list a, .item_list a, .product_data a, table.product a, .info_detail a, a[href*='pid=']")
         if first_product_a and first_product_a.get("href"):
@@ -128,10 +145,7 @@ def fetch_product_image_url(target_url, headers):
             print(f" -> 2階層下の個別商品ページへ移動: {deep_url}")
             img_url = extract_image_from_detail_page(deep_url, headers)
             if img_url:
-                if img_url.startswith("http://"):
-                    img_url = img_url.replace("http://", "https://", 1)
-                # PC版LINE対策：末尾のクエリパラメータ(?以降)を除去
-                return img_url.split('?')[0]
+                return clean_image_url(img_url)
 
     except Exception as e:
         print(f"画像検索巡回エラー ({target_url}): {e}")
