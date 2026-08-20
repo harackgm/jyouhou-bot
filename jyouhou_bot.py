@@ -119,7 +119,8 @@ def fetch_product_image_url(target_url, headers):
         if img_url:
             if img_url.startswith("http://"):
                 img_url = img_url.replace("http://", "https://", 1)
-            return img_url
+            # PC版LINE対策：末尾のクエリパラメータ(?以降)を除去
+            return img_url.split('?')[0]
 
         first_product_a = soup.select_one(".product_list a, .item_list a, .product_data a, table.product a, .info_detail a, a[href*='pid=']")
         if first_product_a and first_product_a.get("href"):
@@ -129,7 +130,8 @@ def fetch_product_image_url(target_url, headers):
             if img_url:
                 if img_url.startswith("http://"):
                     img_url = img_url.replace("http://", "https://", 1)
-                return img_url
+                # PC版LINE対策：末尾のクエリパラメータ(?以降)を除去
+                return img_url.split('?')[0]
 
     except Exception as e:
         print(f"画像検索巡回エラー ({target_url}): {e}")
