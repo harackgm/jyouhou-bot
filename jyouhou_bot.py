@@ -288,6 +288,7 @@ def main():
         print("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
         return
 
+    # 全件チェックして未通知アイテムを確実に抽出
     new_items = []
     for title, url, item_key in all_items:
         if not is_notified(item_key):
@@ -301,14 +302,22 @@ def main():
 
     processed_items = []
 
+    # 各アイテムを個別に安全処理
     for title, url, item_key in new_items:
         print(f"新着商品処理中: {title}")
-        img_url = fetch_product_image_url(url, headers)
-        print(f" -> 最終決定画像URL: {img_url}")
-        processed_items.append((title, url, img_url))
-        save_notified(item_key, title, url)
+        try:
+            img_url = fetch_product_image_url(url, headers)
+            print(f" -> 最終決定画像URL: {img_url}")
+            processed_items.append((title, url, img_url))
+            save_notified(item_key, title, url)
+        except Exception as e:
+            print(f"エラー発生 ({title}): {e}")
+            # エラー時もロゴ指定でLINE通知対象に入れてスキップ防止
+            processed_items.append((title, url, DEFAULT_LOGO_URL))
+            save_notified(item_key, title, url)
 
-    send_flex_message(processed_items)
+    if processed_items:
+        send_flex_message(processed_items)
 
 if __name__ == "__main__":
     main()
