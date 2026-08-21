@@ -82,21 +82,28 @@ def save_notified(item_key, title, url):
     conn.commit()
     conn.close()
 
+def reset_specific_items():
+    """ピコイーグルプレイヤーの2件をDBから強制削除して再通知対象にする"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM notified_products WHERE title LIKE '%ピコイーグルプレイヤー%'")
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    print(f"[RESET] {deleted}件のピコイーグルプレイヤーデータをリセットしました。")
+
 def clean_image_url(raw_url):
     """PC版LINE対策：URLを完璧なHTTPS形式かつ高解像度URLに整える"""
     if not raw_url:
         return DEFAULT_LOGO_URL
 
-    # プロトコル補正
     if raw_url.startswith("//"):
         raw_url = "https:" + raw_url
     elif raw_url.startswith("http://"):
         raw_url = raw_url.replace("http://", "https://", 1)
 
-    # クエリパラメータ(?以降)を排除
     clean_url = raw_url.split('?')[0]
 
-    # サムネイル画像(_th)の指定があれば除去して拡大画像URLにする
     if "_th." in clean_url:
         clean_url = clean_url.replace("_th.", ".")
 
@@ -281,14 +288,12 @@ def main():
         print("INFORMATION枠内に商品が見つかりませんでした。")
         return
 
-    # 初回移行（DB件数0件）の場合は全件を一括既読登録して終了する
     if get_db_count() == 0:
         print(f"[INFO] 初回データベース初期化: 現存する{len(all_items)}件を既読登録します。")
         save_notified_bulk(all_items)
         print("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
         return
 
-    # 全件チェックして未通知アイテムを確実に抽出
     new_items = []
     for title, url, item_key in all_items:
         if not is_notified(item_key):
@@ -302,7 +307,6 @@ def main():
 
     processed_items = []
 
-    # 各アイテムを個別に安全処理
     for title, url, item_key in new_items:
         print(f"新着商品処理中: {title}")
         try:
@@ -312,7 +316,6 @@ def main():
             save_notified(item_key, title, url)
         except Exception as e:
             print(f"エラー発生 ({title}): {e}")
-            # エラー時もロゴ指定でLINE通知対象に入れてスキップ防止
             processed_items.append((title, url, DEFAULT_LOGO_URL))
             save_notified(item_key, title, url)
 
@@ -320,4 +323,6 @@ def main():
         send_flex_message(processed_items)
 
 if __name__ == "__main__":
+    init_db()
+    reset_specific_items()  # 今回だけリセットを実行
     main()
