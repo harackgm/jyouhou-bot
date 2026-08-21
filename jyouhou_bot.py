@@ -82,16 +82,6 @@ def save_notified(item_key, title, url):
     conn.commit()
     conn.close()
 
-def reset_specific_items():
-    """ピコイーグルプレイヤーの2件をDBから強制削除して再通知対象にする"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM notified_products WHERE title LIKE '%ピコイーグルプレイヤー%'")
-    deleted = cursor.rowcount
-    conn.commit()
-    conn.close()
-    print(f"[RESET] {deleted}件のピコイーグルプレイヤーデータをリセットしました。")
-
 def clean_image_url(raw_url):
     """PC版LINE対策：URLを完璧なHTTPS形式かつ高解像度URLに整える"""
     if not raw_url:
@@ -323,6 +313,4 @@ def main():
         send_flex_message(processed_items)
 
 if __name__ == "__main__":
-    init_db()
-    reset_specific_items()  # 今回だけリセットを実行
     main()
