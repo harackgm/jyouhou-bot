@@ -8,6 +8,7 @@ TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://fishing-shop-jh.com/img/logo.png"
 DB_PATH = "products.db"
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+MAX_NOTIFY_LIMIT = 10  # 一度に通知する上限（10件を超える爆発的な検知時は自動スキップ）
 
 def generate_item_key(title, url):
     """タイトルとURLの組み合わせから一意の識別キーを生成"""
@@ -208,7 +209,7 @@ def send_flex_message(items):
             print(f"LINE通知送信失敗: {response.status_code} {response.text}")
 
 def get_top_information_items(soup):
-    """div.info エリアから「予約」「NEW」「再入荷」すべてのテキストを確実に取得"""
+    """div.info エリアから「予約」「NEW」「再入荷」含む全テキストを精度高く取得"""
     info_div = soup.find("div", class_="info")
     if not info_div:
         print("[WARN] div.info が見つかりませんでした。")
@@ -219,9 +220,9 @@ def get_top_information_items(soup):
 
     for a_tag in info_div.find_all("a", href=True):
         href = a_tag["href"]
-        text = " ".join(a_tag.stripped_strings)
+        text = a_tag.get_text(" ", strip=True)
 
-        if href and text:
+        if href and text and len(text) > 2:
             full_url = requests.compat.urljoin(TARGET_URL, href)
             item_key = generate_item_key(text, full_url)
             
@@ -254,6 +255,7 @@ def main():
         print("INFORMATION枠内に商品が見つかりませんでした。")
         return
 
+    # 初回または全体リセット直後の場合は全件既読登録のみ
     if get_db_count() == 0:
         print(f"[INFO] 初回データベース初期化: 現存する{len(all_items)}件を既読登録します。")
         save_notified_bulk(all_items)
@@ -269,6 +271,12 @@ def main():
 
     if not new_items:
         print("INFORMATION内に新しい未通知商品はありませんでした。")
+        return
+
+    # ★安全制御：万が一10件を超える大量検知が発生した場合は通数保護のためLINE通知をスキップして全自動既読化
+    if len(new_items) > MAX_NOTIFY_LIMIT:
+        print(f"[WARN] 新規検知が{len(new_items)}件と多いため、LINE通知枠保護により送信をスキップしてDBを更新します。")
+        save_notified_bulk(new_items)
         return
 
     processed_items = []
