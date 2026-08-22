@@ -64,16 +64,6 @@ def save_notified(item_key, title, url):
     conn.commit()
     conn.close()
 
-def reset_reservation_items():
-    """「予約」を含む商品をDBから削除して再通知対象にする"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("DELETE FROM notified_products WHERE title LIKE '%予約%'")
-    deleted = cursor.rowcount
-    conn.commit()
-    conn.close()
-    print(f"[RESET] {deleted}件の「予約」データをリセットしました。")
-
 def clean_image_url(raw_url):
     """画像URL整形"""
     if not raw_url:
@@ -229,7 +219,6 @@ def get_top_information_items(soup):
 
     for a_tag in info_div.find_all("a", href=True):
         href = a_tag["href"]
-        # タグ内の余分な空白・改行を除去し全テキストを連結取得
         text = " ".join(a_tag.stripped_strings)
 
         if href and text:
@@ -300,6 +289,4 @@ def main():
         send_flex_message(processed_items)
 
 if __name__ == "__main__":
-    init_db()
-    reset_reservation_items()  # 今回だけリセットを実行
     main()
