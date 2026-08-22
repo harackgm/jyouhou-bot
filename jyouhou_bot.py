@@ -15,36 +15,18 @@ def generate_item_key(title, url):
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
 def init_db():
-    """DBの初期化および旧テーブル（URL単体キー）からのテーブル移行"""
+    """DBの初期化"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
-    cursor.execute("PRAGMA table_info(notified_products)")
-    columns = [col[1] for col in cursor.fetchall()]
-    
-    if columns and "item_key" not in columns:
-        cursor.execute("ALTER TABLE notified_products RENAME TO old_notified_products")
-        cursor.execute('''
-            CREATE TABLE notified_products (
-                item_key TEXT PRIMARY KEY,
-                url TEXT,
-                title TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        cursor.execute("DROP TABLE old_notified_products")
-        conn.commit()
-    else:
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS notified_products (
-                item_key TEXT PRIMARY KEY,
-                url TEXT,
-                title TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.commit()
-        
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS notified_products (
+            item_key TEXT PRIMARY KEY,
+            url TEXT,
+            title TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+    conn.commit()
     conn.close()
 
 def get_db_count():
@@ -57,7 +39,7 @@ def get_db_count():
     return count
 
 def is_notified(item_key):
-    """タイトル＋URLのペアキーで既読判定"""
+    """既読判定"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('SELECT 1 FROM notified_products WHERE item_key = ?', (item_key,))
@@ -66,7 +48,7 @@ def is_notified(item_key):
     return result is not None
 
 def save_notified_bulk(items):
-    """複数件を一括でDBに保存"""
+    """一括保存"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.executemany('INSERT OR IGNORE INTO notified_products (item_key, title, url) VALUES (?, ?, ?)',
@@ -75,32 +57,38 @@ def save_notified_bulk(items):
     conn.close()
 
 def save_notified(item_key, title, url):
-    """単件を通知済みとしてDBに保存"""
+    """単件保存"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('INSERT OR IGNORE INTO notified_products (item_key, title, url) VALUES (?, ?, ?)', (item_key, title, url))
     conn.commit()
     conn.close()
 
+def reset_reservation_items():
+    """「予約」を含む商品をDBから削除して再通知対象にする"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM notified_products WHERE title LIKE '%予約%'")
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    print(f"[RESET] {deleted}件の「予約」データをリセットしました。")
+
 def clean_image_url(raw_url):
-    """PC版LINE対策：URLを完璧なHTTPS形式かつ高解像度URLに整える"""
+    """画像URL整形"""
     if not raw_url:
         return DEFAULT_LOGO_URL
-
     if raw_url.startswith("//"):
         raw_url = "https:" + raw_url
     elif raw_url.startswith("http://"):
         raw_url = raw_url.replace("http://", "https://", 1)
-
     clean_url = raw_url.split('?')[0]
-
     if "_th." in clean_url:
         clean_url = clean_url.replace("_th.", ".")
-
     return clean_url
 
 def extract_image_from_detail_page(detail_url, headers):
-    """商品詳細ページ（2階層下）からルアーのメイン画像を直接抽出"""
+    """商品詳細ページから画像を抽出"""
     try:
         res = requests.get(detail_url, headers=headers, timeout=10)
         res.encoding = res.apparent_encoding
@@ -126,7 +114,7 @@ def extract_image_from_detail_page(detail_url, headers):
     return None
 
 def fetch_product_image_url(target_url, headers):
-    """1階層下がカテゴリ一覧の場合は、2階層下の個別商品ページへ潜って画像を確定取得"""
+    """階層を辿って商品画像を取得"""
     try:
         res = requests.get(target_url, headers=headers, timeout=10)
         res.encoding = res.apparent_encoding
@@ -139,7 +127,6 @@ def fetch_product_image_url(target_url, headers):
         first_product_a = soup.select_one(".product_list a, .item_list a, .product_data a, table.product a, .info_detail a, a[href*='pid=']")
         if first_product_a and first_product_a.get("href"):
             deep_url = requests.compat.urljoin(target_url, first_product_a["href"])
-            print(f" -> 2階層下の個別商品ページへ移動: {deep_url}")
             img_url = extract_image_from_detail_page(deep_url, headers)
             if img_url:
                 return clean_image_url(img_url)
@@ -150,7 +137,7 @@ def fetch_product_image_url(target_url, headers):
     return DEFAULT_LOGO_URL
 
 def send_flex_message(items):
-    """LINE Flex Message (カルーセル) で配信（最大10件ずつ分割）"""
+    """LINE Flex Message 送信"""
     if not LINE_ACCESS_TOKEN:
         print("エラー: LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
@@ -158,7 +145,6 @@ def send_flex_message(items):
     chunk_size = 10
     for i in range(0, len(items), chunk_size):
         chunk = items[i:i + chunk_size]
-
         url = "https://api.line.me/v2/bot/message/broadcast"
         headers = {
             "Content-Type": "application/json",
@@ -232,7 +218,7 @@ def send_flex_message(items):
             print(f"LINE通知送信失敗: {response.status_code} {response.text}")
 
 def get_top_information_items(soup):
-    """div.info エリアからINFORMATION内の全リンクを抽出"""
+    """div.info エリアから「予約」「NEW」「再入荷」すべてのテキストを確実に取得"""
     info_div = soup.find("div", class_="info")
     if not info_div:
         print("[WARN] div.info が見つかりませんでした。")
@@ -243,9 +229,10 @@ def get_top_information_items(soup):
 
     for a_tag in info_div.find_all("a", href=True):
         href = a_tag["href"]
-        text = a_tag.get_text(strip=True)
+        # タグ内の余分な空白・改行を除去し全テキストを連結取得
+        text = " ".join(a_tag.stripped_strings)
 
-        if href and text and len(text) > 2:
+        if href and text:
             full_url = requests.compat.urljoin(TARGET_URL, href)
             item_key = generate_item_key(text, full_url)
             
@@ -313,4 +300,6 @@ def main():
         send_flex_message(processed_items)
 
 if __name__ == "__main__":
+    init_db()
+    reset_reservation_items()  # 今回だけリセットを実行
     main()
