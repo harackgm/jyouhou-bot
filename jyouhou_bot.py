@@ -11,7 +11,7 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 # --- 安全装置の設定 ---
 MAX_NOTIFY_LIMIT = 10  # 大量検知時の事故防止ガード（10件超は通知スキップして自動既読化）
-MAX_TRACK_LIMIT = 30   # DBに記憶しておく最新件数の上限（押し出された古いものは忘れる）★50から30に変更
+MAX_TRACK_LIMIT = 15   # DBに記憶しておく最新件数の上限（★30から15に変更し、より早く忘れるように調整）
 
 def generate_item_key(title, url):
     """タイトルとURLの組み合わせから一意の識別キーを生成"""
@@ -74,9 +74,7 @@ def sync_db_with_active_items(active_keys):
         return
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # プレースホルダをキーの数だけ生成
     placeholders = ','.join(['?'] * len(active_keys))
-    # 現在のリストに存在しない過去のキーを全て削除
     cursor.execute(f'DELETE FROM notified_products WHERE item_key NOT IN ({placeholders})', tuple(active_keys))
     deleted_count = cursor.rowcount
     conn.commit()
