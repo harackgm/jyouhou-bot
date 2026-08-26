@@ -8,7 +8,10 @@ TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://fishing-shop-jh.com/img/logo.png"
 DB_PATH = "products.db"
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+
+# --- 安全装置の設定 ---
 MAX_NOTIFY_LIMIT = 10  # 大量検知時の事故防止ガード（10件超は通知スキップして自動既読化）
+MAX_TRACK_LIMIT = 30   # DBに記憶しておく最新件数の上限（押し出された古いものは忘れる）★50から30に変更
 
 def generate_item_key(title, url):
     """タイトルとURLの組み合わせから一意の識別キーを生成"""
@@ -64,6 +67,23 @@ def save_notified(item_key, title, url):
     cursor.execute('INSERT OR IGNORE INTO notified_products (item_key, title, url) VALUES (?, ?, ?)', (item_key, title, url))
     conn.commit()
     conn.close()
+
+def sync_db_with_active_items(active_keys):
+    """現在表示されている最新N件以外の古いデータをDBから削除（忘却）する"""
+    if not active_keys:
+        return
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    # プレースホルダをキーの数だけ生成
+    placeholders = ','.join(['?'] * len(active_keys))
+    # 現在のリストに存在しない過去のキーを全て削除
+    cursor.execute(f'DELETE FROM notified_products WHERE item_key NOT IN ({placeholders})', tuple(active_keys))
+    deleted_count = cursor.rowcount
+    conn.commit()
+    conn.close()
+    
+    if deleted_count > 0:
+        print(f"[INFO] 圏外に押し出された古いデータ {deleted_count} 件をDBから整理（忘却）しました。")
 
 def clean_image_url(raw_url):
     """画像URL整形"""
@@ -209,7 +229,7 @@ def send_flex_message(items):
             print(f"LINE通知送信失敗: {response.status_code} {response.text}")
 
 def get_top_information_items(soup):
-    """div.info エリアから「ラベル(販売/NEW等)＋商品名」の全テキストを確実に取得"""
+    """div.info エリアから「ラベル(販売/NEW等)＋商品名」のテキストを取得（上位N件のみ）"""
     info_div = soup.find("div", class_="info")
     if not info_div:
         print("[WARN] div.info が見つかりませんでした。")
@@ -218,14 +238,12 @@ def get_top_information_items(soup):
     items = []
     seen_keys = set()
 
-    # aタグを起点に、直前のテキスト（ラベル）を遡って結合する
     for a_tag in info_div.find_all("a", href=True):
         href = a_tag["href"]
         
         line_parts = []
         prev = a_tag.previous_sibling
         
-        # 改行(<br>)やリスト(<li>)などの区切りに当たるまで遡る
         block_tags = ["br", "li", "p", "div", "tr", "td", "ul"]
         while prev and getattr(prev, "name", None) not in block_tags:
             if isinstance(prev, str):
@@ -241,7 +259,6 @@ def get_top_information_items(soup):
         label = " ".join(line_parts).strip()
         link_text = a_tag.get_text(" ", strip=True)
         
-        # ラベル(販売など)とリンクテキスト(商品名)を結合して一つのタイトルにする
         full_title = f"{label} {link_text}".strip()
 
         if href and link_text and len(link_text) > 2:
@@ -251,6 +268,10 @@ def get_top_information_items(soup):
             if item_key not in seen_keys:
                 items.append((full_title, full_url, item_key))
                 seen_keys.add(item_key)
+                
+                # 上限に達したら取得終了
+                if len(items) >= MAX_TRACK_LIMIT:
+                    break
 
     return items
 
@@ -270,8 +291,9 @@ def main():
         print(f"Webサイトの取得に失敗しました: {e}")
         return
 
+    # 最新の上位件数のみを取得
     all_items = get_top_information_items(soup)
-    print(f"[DEBUG] 取得されたINFORMATION全件数: {len(all_items)}件")
+    print(f"[DEBUG] 監視対象とする上位最新データ件数: {len(all_items)}件")
 
     if not all_items:
         print("INFORMATION枠内に商品が見つかりませんでした。")
@@ -279,7 +301,7 @@ def main():
 
     # 初回起動時は通知せず全件既読化
     if get_db_count() == 0:
-        print(f"[INFO] 初回データベース初期化: 現存する{len(all_items)}件を既読登録します。")
+        print(f"[INFO] 初回データベース初期化: 最新{len(all_items)}件を既読登録します。")
         save_notified_bulk(all_items)
         print("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
         return
@@ -291,32 +313,33 @@ def main():
 
     print(f"[DEBUG] 未通知の新規件数: {len(new_items)}件")
 
-    if not new_items:
+    if new_items:
+        # 10件を超える場合は誤検知・データ変更とみなしてLINE通知を自動スキップ（通数保護）
+        if len(new_items) > MAX_NOTIFY_LIMIT:
+            print(f"[WARN] 新規検知が{len(new_items)}件と多いため、LINE通知枠保護により送信をスキップしてDBを更新します。")
+            save_notified_bulk(new_items)
+        else:
+            processed_items = []
+            for title, url, item_key in new_items:
+                print(f"新着商品処理中: {title}")
+                try:
+                    img_url = fetch_product_image_url(url, headers)
+                    print(f" -> 最終決定画像URL: {img_url}")
+                    processed_items.append((title, url, img_url))
+                    save_notified(item_key, title, url)
+                except Exception as e:
+                    print(f"エラー発生 ({title}): {e}")
+                    processed_items.append((title, url, DEFAULT_LOGO_URL))
+                    save_notified(item_key, title, url)
+
+            if processed_items:
+                send_flex_message(processed_items)
+    else:
         print("INFORMATION内に新しい未通知商品はありませんでした。")
-        return
 
-    # 10件を超える場合は誤検知・データ変更とみなしてLINE通知を自動スキップ（通数保護）
-    if len(new_items) > MAX_NOTIFY_LIMIT:
-        print(f"[WARN] 新規検知が{len(new_items)}件と多いため、LINE通知枠保護により送信をスキップしてDBを更新します。")
-        save_notified_bulk(new_items)
-        return
-
-    processed_items = []
-
-    for title, url, item_key in new_items:
-        print(f"新着商品処理中: {title}")
-        try:
-            img_url = fetch_product_image_url(url, headers)
-            print(f" -> 最終決定画像URL: {img_url}")
-            processed_items.append((title, url, img_url))
-            save_notified(item_key, title, url)
-        except Exception as e:
-            print(f"エラー発生 ({title}): {e}")
-            processed_items.append((title, url, DEFAULT_LOGO_URL))
-            save_notified(item_key, title, url)
-
-    if processed_items:
-        send_flex_message(processed_items)
+    # 全処理が終わった後、現在の上位リストに含まれない古い過去データをDBから一掃する
+    active_keys = [item_key for _, _, item_key in all_items]
+    sync_db_with_active_items(active_keys)
 
 if __name__ == "__main__":
     main()
