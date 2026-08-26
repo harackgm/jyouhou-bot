@@ -10,8 +10,8 @@ DB_PATH = "products.db"
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 # --- 安全装置の設定 ---
-MAX_NOTIFY_LIMIT = 10  # 大量検知時の事故防止ガード（10件超は通知スキップして自動既読化）
-MAX_TRACK_LIMIT = 15   # DBに記憶しておく最新件数の上限（★30から15に変更し、より早く忘れるように調整）
+MAX_NOTIFY_LIMIT = 10  # 大量検知時の事故防止ガード
+MAX_TRACK_LIMIT = 50   # DBに記憶しておく件数（順位検知を入れたため50件に戻して安全性を高めます）
 
 def generate_item_key(title, url):
     """タイトルとURLの組み合わせから一意の識別キーを生成"""
@@ -19,7 +19,7 @@ def generate_item_key(title, url):
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
 def init_db():
-    """DBの初期化"""
+    """DBの初期化（順位カラムの自動追加対応）"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -30,6 +30,11 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
+    # 古いDBにrankカラムがない場合は安全に追加
+    try:
+        cursor.execute('ALTER TABLE notified_products ADD COLUMN rank INTEGER DEFAULT 999')
+    except sqlite3.OperationalError:
+        pass # すでにカラムが存在する場合はスキップ
     conn.commit()
     conn.close()
 
@@ -42,46 +47,43 @@ def get_db_count():
     conn.close()
     return count
 
-def is_notified(item_key):
-    """既読判定"""
+def get_notified_record(item_key):
+    """DBから特定のアイテムの順位（rank）を取得"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT 1 FROM notified_products WHERE item_key = ?', (item_key,))
+    cursor.execute('SELECT rank FROM notified_products WHERE item_key = ?', (item_key,))
     result = cursor.fetchone()
     conn.close()
-    return result is not None
+    return result
 
-def save_notified_bulk(items):
-    """一括保存"""
+def sync_active_items(active_items):
+    """現在の上位リストに合わせてDBの「順位」を更新し、圏外を忘却する"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.executemany('INSERT OR IGNORE INTO notified_products (item_key, title, url) VALUES (?, ?, ?)',
-                       [(item_key, title, url) for title, url, item_key in items])
-    conn.commit()
-    conn.close()
-
-def save_notified(item_key, title, url):
-    """単件保存"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute('INSERT OR IGNORE INTO notified_products (item_key, title, url) VALUES (?, ?, ?)', (item_key, title, url))
-    conn.commit()
-    conn.close()
-
-def sync_db_with_active_items(active_keys):
-    """現在表示されている最新N件以外の古いデータをDBから削除（忘却）する"""
-    if not active_keys:
-        return
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    placeholders = ','.join(['?'] * len(active_keys))
-    cursor.execute(f'DELETE FROM notified_products WHERE item_key NOT IN ({placeholders})', tuple(active_keys))
-    deleted_count = cursor.rowcount
+    
+    # 1. 現在の順位でDBを上書き（または新規登録）
+    for current_rank, (title, url, item_key) in enumerate(active_items):
+        cursor.execute('UPDATE notified_products SET rank = ?, title = ?, url = ? WHERE item_key = ?', 
+                       (current_rank, title, url, item_key))
+        if cursor.rowcount == 0:
+            cursor.execute('INSERT INTO notified_products (item_key, title, url, rank) VALUES (?, ?, ?, ?)', 
+                           (item_key, title, url, current_rank))
+            
+    # 2. 上位リストから外れた古いデータを削除
+    active_keys = [item_key for _, _, item_key in active_items]
+    if active_keys:
+        placeholders = ','.join(['?'] * len(active_keys))
+        cursor.execute(f'DELETE FROM notified_products WHERE item_key NOT IN ({placeholders})', tuple(active_keys))
+        deleted_count = cursor.rowcount
+    else:
+        cursor.execute('DELETE FROM notified_products')
+        deleted_count = cursor.rowcount
+        
     conn.commit()
     conn.close()
     
     if deleted_count > 0:
-        print(f"[INFO] 圏外に押し出された古いデータ {deleted_count} 件をDBから整理（忘却）しました。")
+        print(f"[INFO] 圏外に押し出された古いデータ {deleted_count} 件をDBから整理しました。")
 
 def clean_image_url(raw_url):
     """画像URL整形"""
@@ -161,7 +163,7 @@ def send_flex_message(items):
         }
 
         bubbles = []
-        for title, product_url, img_url in chunk:
+        for title, product_url, img_url, _ in chunk:
             display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
             display_img = img_url if img_url else DEFAULT_LOGO_URL
 
@@ -227,7 +229,7 @@ def send_flex_message(items):
             print(f"LINE通知送信失敗: {response.status_code} {response.text}")
 
 def get_top_information_items(soup):
-    """div.info エリアから「ラベル(販売/NEW等)＋商品名」のテキストを取得（上位N件のみ）"""
+    """div.info エリアから全テキストを取得（上限MAX_TRACK_LIMIT件）"""
     info_div = soup.find("div", class_="info")
     if not info_div:
         print("[WARN] div.info が見つかりませんでした。")
@@ -267,7 +269,6 @@ def get_top_information_items(soup):
                 items.append((full_title, full_url, item_key))
                 seen_keys.add(item_key)
                 
-                # 上限に達したら取得終了
                 if len(items) >= MAX_TRACK_LIMIT:
                     break
 
@@ -289,7 +290,6 @@ def main():
         print(f"Webサイトの取得に失敗しました: {e}")
         return
 
-    # 最新の上位件数のみを取得
     all_items = get_top_information_items(soup)
     print(f"[DEBUG] 監視対象とする上位最新データ件数: {len(all_items)}件")
 
@@ -300,44 +300,54 @@ def main():
     # 初回起動時は通知せず全件既読化
     if get_db_count() == 0:
         print(f"[INFO] 初回データベース初期化: 最新{len(all_items)}件を既読登録します。")
-        save_notified_bulk(all_items)
+        sync_active_items(all_items)
         print("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
         return
 
+    # 新規および順位浮上（再入荷）の判定
     new_items = []
-    for title, url, item_key in all_items:
-        if not is_notified(item_key):
-            new_items.append((title, url, item_key))
+    for current_rank, (title, url, item_key) in enumerate(all_items):
+        record = get_notified_record(item_key)
+        
+        if not record:
+            # 完全に新規
+            new_items.append((title, url, item_key, current_rank))
+        else:
+            previous_rank = record[0]
+            if previous_rank is None:
+                previous_rank = 999
+                
+            # 再浮上検知：トップ5以内に移動し、かつ順位が前回より上がっていること
+            if current_rank <= 4 and current_rank < previous_rank:
+                # 自然繰り上げ（他商品の削除等）の誤検知を防ぐため、2ランク以上のジャンプまたは堂々の1位になった場合のみ通知
+                if current_rank == 0 or (previous_rank - current_rank >= 2):
+                    print(f"[DEBUG] 浮上検知: {title} (前回{previous_rank}位 -> 今回{current_rank}位)")
+                    new_items.append((title, url, item_key, current_rank))
 
-    print(f"[DEBUG] 未通知の新規件数: {len(new_items)}件")
+    print(f"[DEBUG] 検知された新規・再入荷件数: {len(new_items)}件")
 
     if new_items:
-        # 10件を超える場合は誤検知・データ変更とみなしてLINE通知を自動スキップ（通数保護）
         if len(new_items) > MAX_NOTIFY_LIMIT:
-            print(f"[WARN] 新規検知が{len(new_items)}件と多いため、LINE通知枠保護により送信をスキップしてDBを更新します。")
-            save_notified_bulk(new_items)
+            print(f"[WARN] 検知が{len(new_items)}件と多いため、LINE通知枠保護により送信をスキップしてDBを更新します。")
         else:
             processed_items = []
-            for title, url, item_key in new_items:
+            for title, url, item_key, rank in new_items:
                 print(f"新着商品処理中: {title}")
                 try:
                     img_url = fetch_product_image_url(url, headers)
-                    print(f" -> 最終決定画像URL: {img_url}")
-                    processed_items.append((title, url, img_url))
-                    save_notified(item_key, title, url)
+                    processed_items.append((title, url, img_url, item_key))
                 except Exception as e:
                     print(f"エラー発生 ({title}): {e}")
-                    processed_items.append((title, url, DEFAULT_LOGO_URL))
-                    save_notified(item_key, title, url)
+                    processed_items.append((title, url, DEFAULT_LOGO_URL, item_key))
 
             if processed_items:
                 send_flex_message(processed_items)
     else:
         print("INFORMATION内に新しい未通知商品はありませんでした。")
 
-    # 全処理が終わった後、現在の上位リストに含まれない古い過去データをDBから一掃する
-    active_keys = [item_key for _, _, item_key in all_items]
-    sync_db_with_active_items(active_keys)
+    # 全処理完了後、DBの全順位を最新状態に一括同期
+    sync_active_items(all_items)
+    print("--- 処理が正常に完了しました ---")
 
 if __name__ == "__main__":
     main()
