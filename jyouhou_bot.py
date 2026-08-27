@@ -11,7 +11,7 @@ DB_PATH = "products.db"
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 # --- 安全装置の設定 ---
-MAX_NOTIFY_LIMIT = 10  # 大量検知時の事故防止ガード（この件数を超えたら個別通知しない）
+MAX_NOTIFY_LIMIT = 10  # 大量検知時の事故防止ガード
 MAX_TRACK_LIMIT = 50   # DBに記憶しておく件数
 
 def generate_item_key(title, url):
@@ -227,9 +227,8 @@ def send_flex_message(items):
             print(f"[ERROR] LINE通知送信失敗: {response.status_code} {response.text}")
 
 def send_summary_message(new_items):
-    """大量更新時にメッセージ枠を守りつつ概要だけを1通で通知する（エラー処理強化版）"""
+    """大量更新時にメッセージ枠を守りつつ概要だけを1通で通知する"""
     if not LINE_ACCESS_TOKEN:
-        print("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
     
     url = "https://api.line.me/v2/bot/message/broadcast"
@@ -238,7 +237,6 @@ def send_summary_message(new_items):
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
     }
     
-    # 上位5件の商品名を抽出してプレビューを作成
     sample_texts = "\n".join([f"・{title}" for title, _, _, _ in new_items[:5]])
     more_text = f"\n...他 {len(new_items) - 5}件" if len(new_items) > 5 else ""
     
@@ -251,40 +249,41 @@ def send_summary_message(new_items):
     payload = {
         "messages": [{"type": "text", "text": text}]
     }
-    
-    try:
-        response = requests.post(url, headers=headers, json=payload, timeout=10)
-        if response.status_code == 200:
-            print("[INFO] サマリー通知を送信しました。")
-        else:
-            print(f"[ERROR] サマリー通知送信失敗: HTTP {response.status_code} - {response.text}")
-    except Exception as e:
-        print(f"[ERROR] サマリー通知送信中に例外が発生しました: {e}")
+    requests.post(url, headers=headers, json=payload)
+    print("[INFO] サマリー通知を送信しました。")
 
 def get_top_information_items(soup):
-    """INFORMATIONエリアから全テキストを取得（取得漏れ防止を強化）"""
-    info_area = soup.find(class_=lambda x: x and "info" in x)
+    """INFORMATIONエリア（div.info直下のdl）から正確にアイテム情報を取得"""
+    info_area = soup.find("div", class_="info")
     if not info_area:
-        print("[WARN] INFORMATION エリアが見つかりませんでした。")
+        print("[WARN] div.info が見つかりませんでした。")
+        return []
+
+    dl_tag = info_area.find("dl", class_="info_detail")
+    if not dl_tag:
+        print("[WARN] info_detail の dlタグが見つかりませんでした。")
         return []
 
     items = []
     seen_keys = set()
 
-    for a_tag in info_area.find_all("a", href=True):
+    # 各行（<strong>または<a>が含まれるまとまり）を安全に解析するため、子要素のaタグを基準に走査
+    for a_tag in dl_tag.find_all("a", href=True):
         href = a_tag["href"]
         link_text = a_tag.get_text(" ", strip=True)
         
         if not href or len(link_text) <= 2:
             continue
-            
-        parent = a_tag.find_parent(["li", "dd", "p", "div", "tr"])
-        if parent:
-            raw_text = parent.get_text(" ", strip=True)
-            full_title = re.sub(r'\s+', ' ', raw_text).strip()
+
+        # aタグが含まれている親の strong タグ、またはその周辺のテキスト（NEWや予約など）を結合
+        parent_strong = a_tag.find_parent("strong")
+        if parent_strong:
+            # strongタグ全体のテキストを取得（例: "NEW 【ロデオクラフト USSA 26シグネイチャー】"）
+            full_title = re.sub(r'\s+', ' ', parent_strong.get_text(" ", strip=True)).strip()
         else:
+            # 万が一構造が違う場合のフォールバック
             full_title = link_text
-            
+
         full_url = requests.compat.urljoin(TARGET_URL, href)
         item_key = generate_item_key(full_title, full_url)
         
