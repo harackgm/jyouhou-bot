@@ -4,6 +4,7 @@ import hashlib
 import requests
 import re
 from bs4 import BeautifulSoup
+from datetime import datetime, timezone, timedelta
 
 TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://fishing-shop-jh.com/img/logo.png"
@@ -13,6 +14,14 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 # --- 安全装置の設定 ---
 MAX_NOTIFY_LIMIT = 10  # 大量検知時の事故防止ガード
 MAX_TRACK_LIMIT = 50   # DBに記憶しておく件数
+
+# --- 日本時間(JST)の設定 ---
+JST = timezone(timedelta(hours=+9), 'JST')
+
+def log(msg):
+    """JSTのタイムスタンプ付きでログを出力する"""
+    now = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
+    print(f"[{now}] {msg}")
 
 def generate_item_key(title, url):
     """タイトルとURLの組み合わせから一意の識別キーを生成"""
@@ -90,7 +99,7 @@ def extract_image_from_detail_page(detail_url, headers):
                 if not any(k in src for k in ["logo", "icon", "banner", "instagram", "facebook", "twitter", "line"]):
                     return requests.compat.urljoin(detail_url, img["src"])
     except Exception as e:
-        print(f"詳細ページ画像取得エラー ({detail_url}): {e}")
+        log(f"[ERROR] 詳細ページ画像取得エラー ({detail_url}): {e}")
     return None
 
 def fetch_product_image_url(target_url, headers):
@@ -112,14 +121,14 @@ def fetch_product_image_url(target_url, headers):
                 return clean_image_url(img_url)
 
     except Exception as e:
-        print(f"画像検索巡回エラー ({target_url}): {e}")
+        log(f"[ERROR] 画像検索巡回エラー ({target_url}): {e}")
 
     return DEFAULT_LOGO_URL
 
 def send_flex_message(items):
     """LINE Flex Message 送信"""
     if not LINE_ACCESS_TOKEN:
-        print("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
+        log("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
     chunk_size = 10
@@ -193,9 +202,9 @@ def send_flex_message(items):
 
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code == 200:
-            print(f"LINE画像付きFlex通知送信成功 ({len(chunk)}件)")
+            log(f"[INFO] LINE画像付きFlex通知送信成功 ({len(chunk)}件)")
         else:
-            print(f"[ERROR] LINE通知送信失敗: {response.status_code} {response.text}")
+            log(f"[ERROR] LINE通知送信失敗: {response.status_code} {response.text}")
 
 def send_summary_message(new_items):
     """大量更新時にメッセージ枠を守りつつ概要だけを1通で通知する"""
@@ -221,23 +230,21 @@ def send_summary_message(new_items):
         "messages": [{"type": "text", "text": text}]
     }
     requests.post(url, headers=headers, json=payload)
-    print("[INFO] サマリー通知を送信しました。")
+    log("[INFO] サマリー通知を送信しました。")
 
 def get_top_information_items(soup):
     """div.info エリアから全テキストをシンプルかつ確実に取得（上限MAX_TRACK_LIMIT件）"""
     info_div = soup.find("div", class_="info")
     if not info_div:
-        print("[WARN] div.info が見つかりませんでした。")
+        log("[WARN] div.info が見つかりませんでした。")
         return []
 
     items = []
     seen_keys = set()
 
-    # aタグ内に「NEW」「販売」等のラベルを含め全て入っているため、aタグのテキストのみを抽出
     for a_tag in info_div.find_all("a", href=True):
         href = a_tag["href"]
         
-        # 不要な改行や空白を削除して1行にする
         full_title = re.sub(r'\s+', ' ', a_tag.get_text(strip=True))
 
         if not href or len(full_title) <= 2:
@@ -257,7 +264,7 @@ def get_top_information_items(soup):
 
 def main():
     init_db()
-    print("城峰釣具店 (INFORMATION監視) を開始します...")
+    log("城峰釣具店 (INFORMATION監視) を開始します...")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -268,24 +275,24 @@ def main():
         response.encoding = response.apparent_encoding
         soup = BeautifulSoup(response.text, "html.parser")
     except Exception as e:
-        print(f"Webサイトの取得に失敗しました: {e}")
+        log(f"[ERROR] Webサイトの取得に失敗しました: {e}")
         return
 
     # 現在のサイトの最新リストを取得
     all_items = get_top_information_items(soup)
-    print(f"[DEBUG] 監視対象とする上位最新データ件数: {len(all_items)}件")
+    log(f"[DEBUG] 監視対象とする上位最新データ件数: {len(all_items)}件")
 
     if not all_items:
-        print("INFORMATION枠内に商品が見つかりませんでした。")
+        log("[INFO] INFORMATION枠内に商品が見つかりませんでした。")
         return
 
     # DBから前回のリストを取得
     prev_keys = get_previous_snapshot()
 
     if not prev_keys:
-        print(f"[INFO] 初回データベース初期化: 最新{len(all_items)}件を記憶します。")
+        log(f"[INFO] 初回データベース初期化: 最新{len(all_items)}件を記憶します。")
         save_snapshot(all_items)
-        print("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
+        log("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
         return
 
     # 今回のリストのキー配列
@@ -304,39 +311,39 @@ def main():
     # 差分と上積みの検知
     for i, (title, url, item_key) in enumerate(all_items):
         if item_key not in prev_keys:
-            # 1. 完全な新規追加（前回どこにも存在しなかった）
+            # 1. 完全な新規追加
             new_items.append((title, url, item_key, i))
-            print(f"[DEBUG] 新規追加検知: {title}")
+            log(f"[DEBUG] 新規追加検知: {title}")
         elif anchor_curr_index != -1 and i < anchor_curr_index:
             # 2. 上積み検知（基準点よりも上に積まれた、過去商品の再浮上）
             new_items.append((title, url, item_key, i))
-            print(f"[DEBUG] 再浮上（上積み）検知: {title}")
+            log(f"[DEBUG] 再浮上（上積み）検知: {title}")
 
-    print(f"[DEBUG] 検知された新規・再入荷件数: {len(new_items)}件")
+    log(f"[DEBUG] 検知された新規・再入荷件数: {len(new_items)}件")
 
     if new_items:
         if len(new_items) > MAX_NOTIFY_LIMIT:
-            print(f"[WARN] 検知が{len(new_items)}件と多いため、LINE通知枠保護により個別送信をスキップし、サマリー通知を送信します。")
+            log(f"[WARN] 検知が{len(new_items)}件と多いため、LINE通知枠保護により個別送信をスキップし、サマリー通知を送信します。")
             send_summary_message(new_items)
         else:
             processed_items = []
             for title, url, item_key, rank in new_items:
-                print(f"新着商品処理中: {title}")
+                log(f"[INFO] 新着商品処理中: {title}")
                 try:
                     img_url = fetch_product_image_url(url, headers)
                     processed_items.append((title, url, img_url, item_key))
                 except Exception as e:
-                    print(f"エラー発生 ({title}): {e}")
+                    log(f"[ERROR] エラー発生 ({title}): {e}")
                     processed_items.append((title, url, DEFAULT_LOGO_URL, item_key))
 
             if processed_items:
                 send_flex_message(processed_items)
     else:
-        print("INFORMATION内に新しい未通知商品はありませんでした。")
+        log("[INFO] INFORMATION内に新しい未通知商品はありませんでした。")
 
     # 処理がすべて終わったら、現在の状態を次回の比較用（スナップショット）としてDBに上書き保存
     save_snapshot(all_items)
-    print("--- 処理が正常に完了しました ---")
+    log("--- 処理が正常に完了しました ---")
 
 if __name__ == "__main__":
     main()
