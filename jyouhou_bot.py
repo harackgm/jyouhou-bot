@@ -2,6 +2,7 @@ import os
 import sqlite3
 import hashlib
 import requests
+import re
 from bs4 import BeautifulSoup
 
 TARGET_URL = "https://fishing-shop-jh.com/"
@@ -11,7 +12,7 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 # --- 安全装置の設定 ---
 MAX_NOTIFY_LIMIT = 10  # 大量検知時の事故防止ガード
-MAX_TRACK_LIMIT = 50   # DBに記憶しておく件数（順位検知を入れたため50件に戻して安全性を高めます）
+MAX_TRACK_LIMIT = 50   # DBに記憶しておく件数
 
 def generate_item_key(title, url):
     """タイトルとURLの組み合わせから一意の識別キーを生成"""
@@ -30,11 +31,10 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    # 古いDBにrankカラムがない場合は安全に追加
     try:
         cursor.execute('ALTER TABLE notified_products ADD COLUMN rank INTEGER DEFAULT 999')
     except sqlite3.OperationalError:
-        pass # すでにカラムが存在する場合はスキップ
+        pass
     conn.commit()
     conn.close()
 
@@ -61,7 +61,6 @@ def sync_active_items(active_items):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # 1. 現在の順位でDBを上書き（または新規登録）
     for current_rank, (title, url, item_key) in enumerate(active_items):
         cursor.execute('UPDATE notified_products SET rank = ?, title = ?, url = ? WHERE item_key = ?', 
                        (current_rank, title, url, item_key))
@@ -69,7 +68,6 @@ def sync_active_items(active_items):
             cursor.execute('INSERT INTO notified_products (item_key, title, url, rank) VALUES (?, ?, ?, ?)', 
                            (item_key, title, url, current_rank))
             
-    # 2. 上位リストから外れた古いデータを削除
     active_keys = [item_key for _, _, item_key in active_items]
     if active_keys:
         placeholders = ','.join(['?'] * len(active_keys))
@@ -228,49 +226,67 @@ def send_flex_message(items):
         else:
             print(f"LINE通知送信失敗: {response.status_code} {response.text}")
 
+def send_summary_message(new_items):
+    """大量更新時にメッセージ枠を守りつつ概要だけを1通で通知する"""
+    if not LINE_ACCESS_TOKEN:
+        return
+    url = "https://api.line.me/v2/bot/message/broadcast"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
+    }
+    
+    # 上位5件の商品名を抽出してプレビューを作成
+    sample_texts = "\n".join([f"・{title}" for title, _, _, _ in new_items[:5]])
+    more_text = f"\n...他 {len(new_items) - 5}件" if len(new_items) > 5 else ""
+    
+    text = (f"⚠️ 【城峰釣具店】大量更新アラート ⚠️\n"
+            f"一気に {len(new_items)} 件の新着・再入荷が検知されました。\n"
+            f"※大量通知防止ガードが作動したため、個別画像通知をスキップしました。\n\n"
+            f"【更新内容の一部】\n{sample_texts}{more_text}\n\n"
+            f"▼詳細はサイトをご確認ください\n{TARGET_URL}")
+            
+    payload = {
+        "messages": [{"type": "text", "text": text}]
+    }
+    requests.post(url, headers=headers, json=payload)
+    print("[INFO] サマリー通知を送信しました。")
+
 def get_top_information_items(soup):
-    """div.info エリアから全テキストを取得（上限MAX_TRACK_LIMIT件）"""
-    info_div = soup.find("div", class_="info")
-    if not info_div:
-        print("[WARN] div.info が見つかりませんでした。")
+    """INFORMATIONエリアから全テキストを取得（取得漏れ防止を強化）"""
+    # div, dl, section などクラス名に 'info' を含む要素を柔軟に検索
+    info_area = soup.find(class_=lambda x: x and "info" in x)
+    if not info_area:
+        print("[WARN] INFORMATION エリアが見つかりませんでした。")
         return []
 
     items = []
     seen_keys = set()
 
-    for a_tag in info_div.find_all("a", href=True):
+    for a_tag in info_area.find_all("a", href=True):
         href = a_tag["href"]
-        
-        line_parts = []
-        prev = a_tag.previous_sibling
-        
-        block_tags = ["br", "li", "p", "div", "tr", "td", "ul"]
-        while prev and getattr(prev, "name", None) not in block_tags:
-            if isinstance(prev, str):
-                text = prev.strip()
-                if text:
-                    line_parts.insert(0, text)
-            else:
-                text = prev.get_text(strip=True)
-                if text:
-                    line_parts.insert(0, text)
-            prev = prev.previous_sibling
-        
-        label = " ".join(line_parts).strip()
         link_text = a_tag.get_text(" ", strip=True)
         
-        full_title = f"{label} {link_text}".strip()
-
-        if href and link_text and len(link_text) > 2:
-            full_url = requests.compat.urljoin(TARGET_URL, href)
-            item_key = generate_item_key(full_title, full_url)
+        if not href or len(link_text) <= 2:
+            continue
             
-            if item_key not in seen_keys:
-                items.append((full_title, full_url, item_key))
-                seen_keys.add(item_key)
-                
-                if len(items) >= MAX_TRACK_LIMIT:
-                    break
+        # リンクの親要素（行全体）からテキストを取得し、「NEW」などのラベル漏れを防ぐ
+        parent = a_tag.find_parent(["li", "dd", "p", "div", "tr"])
+        if parent:
+            raw_text = parent.get_text(" ", strip=True)
+            full_title = re.sub(r'\s+', ' ', raw_text).strip()
+        else:
+            full_title = link_text
+            
+        full_url = requests.compat.urljoin(TARGET_URL, href)
+        item_key = generate_item_key(full_title, full_url)
+        
+        if item_key not in seen_keys:
+            items.append((full_title, full_url, item_key))
+            seen_keys.add(item_key)
+            
+            if len(items) >= MAX_TRACK_LIMIT:
+                break
 
     return items
 
@@ -297,29 +313,24 @@ def main():
         print("INFORMATION枠内に商品が見つかりませんでした。")
         return
 
-    # 初回起動時は通知せず全件既読化
     if get_db_count() == 0:
         print(f"[INFO] 初回データベース初期化: 最新{len(all_items)}件を既読登録します。")
         sync_active_items(all_items)
         print("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
         return
 
-    # 新規および順位浮上（再入荷）の判定
     new_items = []
     for current_rank, (title, url, item_key) in enumerate(all_items):
         record = get_notified_record(item_key)
         
         if not record:
-            # 完全に新規
             new_items.append((title, url, item_key, current_rank))
         else:
             previous_rank = record[0]
             if previous_rank is None:
                 previous_rank = 999
                 
-            # 再浮上検知：トップ5以内に移動し、かつ順位が前回より上がっていること
             if current_rank <= 4 and current_rank < previous_rank:
-                # 自然繰り上げ（他商品の削除等）の誤検知を防ぐため、2ランク以上のジャンプまたは堂々の1位になった場合のみ通知
                 if current_rank == 0 or (previous_rank - current_rank >= 2):
                     print(f"[DEBUG] 浮上検知: {title} (前回{previous_rank}位 -> 今回{current_rank}位)")
                     new_items.append((title, url, item_key, current_rank))
@@ -328,7 +339,8 @@ def main():
 
     if new_items:
         if len(new_items) > MAX_NOTIFY_LIMIT:
-            print(f"[WARN] 検知が{len(new_items)}件と多いため、LINE通知枠保護により送信をスキップしてDBを更新します。")
+            print(f"[WARN] 検知が{len(new_items)}件と多いため、LINE通知枠保護により個別送信をスキップし、サマリー通知を送信します。")
+            send_summary_message(new_items)
         else:
             processed_items = []
             for title, url, item_key, rank in new_items:
@@ -345,7 +357,6 @@ def main():
     else:
         print("INFORMATION内に新しい未通知商品はありませんでした。")
 
-    # 全処理完了後、DBの全順位を最新状態に一括同期
     sync_active_items(all_items)
     print("--- 処理が正常に完了しました ---")
 
