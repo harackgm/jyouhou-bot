@@ -11,7 +11,7 @@ DB_PATH = "products.db"
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 # --- 安全装置の設定 ---
-MAX_NOTIFY_LIMIT = 10  # 大量検知時の事故防止ガード
+MAX_NOTIFY_LIMIT = 10  # 大量検知時の事故防止ガード（この件数を超えたら個別通知しない）
 MAX_TRACK_LIMIT = 50   # DBに記憶しておく件数
 
 def generate_item_key(title, url):
@@ -148,7 +148,7 @@ def fetch_product_image_url(target_url, headers):
 def send_flex_message(items):
     """LINE Flex Message 送信"""
     if not LINE_ACCESS_TOKEN:
-        print("エラー: LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
+        print("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
     chunk_size = 10
@@ -224,12 +224,14 @@ def send_flex_message(items):
         if response.status_code == 200:
             print(f"LINE画像付きFlex通知送信成功 ({len(chunk)}件)")
         else:
-            print(f"LINE通知送信失敗: {response.status_code} {response.text}")
+            print(f"[ERROR] LINE通知送信失敗: {response.status_code} {response.text}")
 
 def send_summary_message(new_items):
-    """大量更新時にメッセージ枠を守りつつ概要だけを1通で通知する"""
+    """大量更新時にメッセージ枠を守りつつ概要だけを1通で通知する（エラー処理強化版）"""
     if not LINE_ACCESS_TOKEN:
+        print("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
+    
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
         "Content-Type": "application/json",
@@ -240,7 +242,7 @@ def send_summary_message(new_items):
     sample_texts = "\n".join([f"・{title}" for title, _, _, _ in new_items[:5]])
     more_text = f"\n...他 {len(new_items) - 5}件" if len(new_items) > 5 else ""
     
-    text = (f"⚠️ 【城峰釣具店】大量更新アラート ⚠️\n"
+    text = (f"⚠️ 【城峰釣具店】更新アラート ⚠️\n"
             f"一気に {len(new_items)} 件の新着・再入荷が検知されました。\n"
             f"※大量通知防止ガードが作動したため、個別画像通知をスキップしました。\n\n"
             f"【更新内容の一部】\n{sample_texts}{more_text}\n\n"
@@ -249,12 +251,18 @@ def send_summary_message(new_items):
     payload = {
         "messages": [{"type": "text", "text": text}]
     }
-    requests.post(url, headers=headers, json=payload)
-    print("[INFO] サマリー通知を送信しました。")
+    
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        if response.status_code == 200:
+            print("[INFO] サマリー通知を送信しました。")
+        else:
+            print(f"[ERROR] サマリー通知送信失敗: HTTP {response.status_code} - {response.text}")
+    except Exception as e:
+        print(f"[ERROR] サマリー通知送信中に例外が発生しました: {e}")
 
 def get_top_information_items(soup):
     """INFORMATIONエリアから全テキストを取得（取得漏れ防止を強化）"""
-    # div, dl, section などクラス名に 'info' を含む要素を柔軟に検索
     info_area = soup.find(class_=lambda x: x and "info" in x)
     if not info_area:
         print("[WARN] INFORMATION エリアが見つかりませんでした。")
@@ -270,7 +278,6 @@ def get_top_information_items(soup):
         if not href or len(link_text) <= 2:
             continue
             
-        # リンクの親要素（行全体）からテキストを取得し、「NEW」などのラベル漏れを防ぐ
         parent = a_tag.find_parent(["li", "dd", "p", "div", "tr"])
         if parent:
             raw_text = parent.get_text(" ", strip=True)
