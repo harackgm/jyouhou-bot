@@ -20,68 +20,39 @@ def generate_item_key(title, url):
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
 def init_db():
-    """DBの初期化（順位カラムの自動追加対応）"""
+    """DBの初期化（上積み検知用のスナップショットテーブル）"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS notified_products (
-            item_key TEXT PRIMARY KEY,
-            url TEXT,
+        CREATE TABLE IF NOT EXISTS snapshot (
+            rank INTEGER PRIMARY KEY,
+            item_key TEXT,
             title TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            url TEXT
         )
     ''')
-    try:
-        cursor.execute('ALTER TABLE notified_products ADD COLUMN rank INTEGER DEFAULT 999')
-    except sqlite3.OperationalError:
-        pass
     conn.commit()
     conn.close()
 
-def get_db_count():
-    """DB内の総件数を取得"""
+def get_previous_snapshot():
+    """前回の監視リスト（キーの配列）を順位順に取得"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT COUNT(*) FROM notified_products')
-    count = cursor.fetchone()[0]
+    cursor.execute('SELECT item_key FROM snapshot ORDER BY rank ASC')
+    keys = [row[0] for row in cursor.fetchall()]
     conn.close()
-    return count
+    return keys
 
-def get_notified_record(item_key):
-    """DBから特定のアイテムの順位（rank）を取得"""
+def save_snapshot(items):
+    """今回の監視リストをDBに上書き保存"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT rank FROM notified_products WHERE item_key = ?', (item_key,))
-    result = cursor.fetchone()
-    conn.close()
-    return result
-
-def sync_active_items(active_items):
-    """現在の上位リストに合わせてDBの「順位」を更新し、圏外を忘却する"""
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    
-    for current_rank, (title, url, item_key) in enumerate(active_items):
-        cursor.execute('UPDATE notified_products SET rank = ?, title = ?, url = ? WHERE item_key = ?', 
-                       (current_rank, title, url, item_key))
-        if cursor.rowcount == 0:
-            cursor.execute('INSERT INTO notified_products (item_key, title, url, rank) VALUES (?, ?, ?, ?)', 
-                           (item_key, title, url, current_rank))
-            
-    active_keys = [item_key for _, _, item_key in active_items]
-    if active_keys:
-        placeholders = ','.join(['?'] * len(active_keys))
-        cursor.execute(f'DELETE FROM notified_products WHERE item_key NOT IN ({placeholders})', tuple(active_keys))
-        deleted_count = cursor.rowcount
-    else:
-        cursor.execute('DELETE FROM notified_products')
-        deleted_count = cursor.rowcount
-        
+    cursor.execute('DELETE FROM snapshot')
+    for rank, (title, url, item_key) in enumerate(items):
+        cursor.execute('INSERT INTO snapshot (rank, item_key, title, url) VALUES (?, ?, ?, ?)', 
+                       (rank, item_key, title, url))
     conn.commit()
     conn.close()
-    
-    if deleted_count > 0:
-        print(f"[INFO] 圏外に押し出された古いデータ {deleted_count} 件をDBから整理しました。")
 
 def clean_image_url(raw_url):
     """画像URL整形"""
@@ -253,36 +224,24 @@ def send_summary_message(new_items):
     print("[INFO] サマリー通知を送信しました。")
 
 def get_top_information_items(soup):
-    """INFORMATIONエリア（div.info直下のdl）から正確にアイテム情報を取得"""
-    info_area = soup.find("div", class_="info")
-    if not info_area:
+    """div.info エリアから全テキストをシンプルかつ確実に取得（上限MAX_TRACK_LIMIT件）"""
+    info_div = soup.find("div", class_="info")
+    if not info_div:
         print("[WARN] div.info が見つかりませんでした。")
-        return []
-
-    dl_tag = info_area.find("dl", class_="info_detail")
-    if not dl_tag:
-        print("[WARN] info_detail の dlタグが見つかりませんでした。")
         return []
 
     items = []
     seen_keys = set()
 
-    # 各行（<strong>または<a>が含まれるまとまり）を安全に解析するため、子要素のaタグを基準に走査
-    for a_tag in dl_tag.find_all("a", href=True):
+    # aタグ内に「NEW」「販売」等のラベルを含め全て入っているため、aタグのテキストのみを抽出
+    for a_tag in info_div.find_all("a", href=True):
         href = a_tag["href"]
-        link_text = a_tag.get_text(" ", strip=True)
         
-        if not href or len(link_text) <= 2:
-            continue
+        # 不要な改行や空白を削除して1行にする
+        full_title = re.sub(r'\s+', ' ', a_tag.get_text(strip=True))
 
-        # aタグが含まれている親の strong タグ、またはその周辺のテキスト（NEWや予約など）を結合
-        parent_strong = a_tag.find_parent("strong")
-        if parent_strong:
-            # strongタグ全体のテキストを取得（例: "NEW 【ロデオクラフト USSA 26シグネイチャー】"）
-            full_title = re.sub(r'\s+', ' ', parent_strong.get_text(" ", strip=True)).strip()
-        else:
-            # 万が一構造が違う場合のフォールバック
-            full_title = link_text
+        if not href or len(full_title) <= 2:
+            continue
 
         full_url = requests.compat.urljoin(TARGET_URL, href)
         item_key = generate_item_key(full_title, full_url)
@@ -312,6 +271,7 @@ def main():
         print(f"Webサイトの取得に失敗しました: {e}")
         return
 
+    # 現在のサイトの最新リストを取得
     all_items = get_top_information_items(soup)
     print(f"[DEBUG] 監視対象とする上位最新データ件数: {len(all_items)}件")
 
@@ -319,27 +279,38 @@ def main():
         print("INFORMATION枠内に商品が見つかりませんでした。")
         return
 
-    if get_db_count() == 0:
-        print(f"[INFO] 初回データベース初期化: 最新{len(all_items)}件を既読登録します。")
-        sync_active_items(all_items)
+    # DBから前回のリストを取得
+    prev_keys = get_previous_snapshot()
+
+    if not prev_keys:
+        print(f"[INFO] 初回データベース初期化: 最新{len(all_items)}件を記憶します。")
+        save_snapshot(all_items)
         print("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
         return
 
+    # 今回のリストのキー配列
+    curr_keys = [item[2] for item in all_items]
+    
+    # 【アンカー（基準点）の特定】
+    # 今回のリストの中で、前回から引き続き存在している「一番上の商品」を探す
+    anchor_curr_index = -1
+    for p_key in prev_keys:
+        if p_key in curr_keys:
+            anchor_curr_index = curr_keys.index(p_key)
+            break
+
     new_items = []
-    for current_rank, (title, url, item_key) in enumerate(all_items):
-        record = get_notified_record(item_key)
-        
-        if not record:
-            new_items.append((title, url, item_key, current_rank))
-        else:
-            previous_rank = record[0]
-            if previous_rank is None:
-                previous_rank = 999
-                
-            if current_rank <= 4 and current_rank < previous_rank:
-                if current_rank == 0 or (previous_rank - current_rank >= 2):
-                    print(f"[DEBUG] 浮上検知: {title} (前回{previous_rank}位 -> 今回{current_rank}位)")
-                    new_items.append((title, url, item_key, current_rank))
+    
+    # 差分と上積みの検知
+    for i, (title, url, item_key) in enumerate(all_items):
+        if item_key not in prev_keys:
+            # 1. 完全な新規追加（前回どこにも存在しなかった）
+            new_items.append((title, url, item_key, i))
+            print(f"[DEBUG] 新規追加検知: {title}")
+        elif anchor_curr_index != -1 and i < anchor_curr_index:
+            # 2. 上積み検知（基準点よりも上に積まれた、過去商品の再浮上）
+            new_items.append((title, url, item_key, i))
+            print(f"[DEBUG] 再浮上（上積み）検知: {title}")
 
     print(f"[DEBUG] 検知された新規・再入荷件数: {len(new_items)}件")
 
@@ -363,7 +334,8 @@ def main():
     else:
         print("INFORMATION内に新しい未通知商品はありませんでした。")
 
-    sync_active_items(all_items)
+    # 処理がすべて終わったら、現在の状態を次回の比較用（スナップショット）としてDBに上書き保存
+    save_snapshot(all_items)
     print("--- 処理が正常に完了しました ---")
 
 if __name__ == "__main__":
