@@ -12,7 +12,7 @@ DB_PATH = "products.db"
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 # --- 安全装置の設定 ---
-MAX_NOTIFY_LIMIT = 10  # 大量検知時の事故防止ガード
+MAX_NOTIFY_LIMIT = 20  # 大量検知時の事故防止ガード（20件に引き上げ）
 MAX_TRACK_LIMIT = 50   # DBに記憶しておく件数
 
 # --- 日本時間(JST)の設定 ---
@@ -131,7 +131,8 @@ def send_flex_message(items):
         log("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
-    chunk_size = 10
+    # 1通のメッセージに含めるアイテム数を5件に変更
+    chunk_size = 5 
     for i in range(0, len(items), chunk_size):
         chunk = items[i:i + chunk_size]
         url = "https://api.line.me/v2/bot/message/broadcast"
@@ -295,29 +296,32 @@ def main():
         log("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
         return
 
-    # 今回のリストのキー配列
-    curr_keys = [item[2] for item in all_items]
-    
-    # 【アンカー（基準点）の特定】
-    # 今回のリストの中で、前回から引き続き存在している「一番上の商品」を探す
-    anchor_curr_index = -1
-    for p_key in prev_keys:
-        if p_key in curr_keys:
-            anchor_curr_index = curr_keys.index(p_key)
-            break
-
     new_items = []
+    existing_items_in_curr = []
     
-    # 差分と上積みの検知
+    # 1. 完全な新規追加の検知と、既存アイテムの相対位置チェック準備
     for i, (title, url, item_key) in enumerate(all_items):
         if item_key not in prev_keys:
-            # 1. 完全な新規追加
+            # 前回どこにも存在しなかった完全な新規
             new_items.append((title, url, item_key, i))
             log(f"[DEBUG] 新規追加検知: {title}")
-        elif anchor_curr_index != -1 and i < anchor_curr_index:
-            # 2. 上積み検知（基準点よりも上に積まれた、過去商品の再浮上）
-            new_items.append((title, url, item_key, i))
-            log(f"[DEBUG] 再浮上（上積み）検知: {title}")
+        else:
+            prev_rank = prev_keys.index(item_key)
+            existing_items_in_curr.append((i, prev_rank, title, url, item_key))
+
+    # 2. 上積み（再浮上）検知：相対的な順位の「追い抜き」を判定
+    for idx, (curr_rank, prev_rank, title, url, item_key) in enumerate(existing_items_in_curr):
+        # 自分より現在の順位が「下」にあるアイテムたちの、過去の順位を取得
+        rest_prev_ranks = [item[1] for item in existing_items_in_curr[idx+1:]]
+        if rest_prev_ranks:
+            min_prev_in_rest = min(rest_prev_ranks)
+            # 過去に自分より上位だったアイテムをごぼう抜きして上にいる = 明示的に上に積まれた
+            if prev_rank > min_prev_in_rest:
+                new_items.append((title, url, item_key, curr_rank))
+                log(f"[DEBUG] 再浮上（上積み）検知: {title} (前回{prev_rank}位 -> 今回{curr_rank}位)")
+
+    # サイトの表示順（上から順）に通知を整理
+    new_items = sorted(new_items, key=lambda x: x[3])
 
     log(f"[DEBUG] 検知された新規・再入荷件数: {len(new_items)}件")
 
