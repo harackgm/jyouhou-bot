@@ -12,7 +12,7 @@ DB_PATH = "products.db"
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 # --- 安全装置の設定 ---
-MAX_NOTIFY_LIMIT = 20  # 大量検知時の事故防止ガード（20件に引き上げ）
+MAX_NOTIFY_LIMIT = 20  # 大量検知時の事故防止ガード
 MAX_TRACK_LIMIT = 50   # DBに記憶しておく件数
 
 # --- 日本時間(JST)の設定 ---
@@ -131,7 +131,6 @@ def send_flex_message(items):
         log("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return
 
-    # 1通のメッセージに含めるアイテム数を5件に変更
     chunk_size = 5 
     for i in range(0, len(items), chunk_size):
         chunk = items[i:i + chunk_size]
@@ -145,6 +144,30 @@ def send_flex_message(items):
         for title, product_url, img_url, _ in chunk:
             display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
             display_img = img_url if img_url else DEFAULT_LOGO_URL
+
+            # --- 文字色分けロジック（LINE Flex Span機能） ---
+            match = re.match(r'^(NEW|再入荷|販売|予約)\s*(.*)', display_title, re.IGNORECASE)
+            if match:
+                label = match.group(1)
+                rest_text = match.group(2)
+                
+                if label.upper() == "NEW":
+                    label_color = "#FF0000"  # 赤
+                elif label == "販売":
+                    label_color = "#FF00FF"  # ピンク
+                elif label == "再入荷":
+                    label_color = "#0066CC"  # 青
+                else:
+                    label_color = "#000000"  # その他（予約など）は黒
+                    
+                spans = [
+                    {"type": "span", "text": f"{label} ", "color": label_color, "weight": "bold"},
+                    {"type": "span", "text": rest_text, "color": "#000000", "weight": "bold"}
+                ]
+            else:
+                spans = [
+                    {"type": "span", "text": display_title, "color": "#000000", "weight": "bold"}
+                ]
 
             bubble = {
                 "type": "bubble",
@@ -161,8 +184,7 @@ def send_flex_message(items):
                     "contents": [
                         {
                             "type": "text",
-                            "text": display_title,
-                            "weight": "bold",
+                            "contents": spans,
                             "size": "md",
                             "wrap": True
                         }
