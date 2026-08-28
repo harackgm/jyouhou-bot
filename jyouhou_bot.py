@@ -8,8 +8,6 @@ from datetime import datetime, timezone, timedelta
 
 TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://fishing-shop-jh.com/img/logo.png"
-
-# 【重要】DBファイル名を変更し、バグった記憶を強制的に捨てて新品に交換します
 DB_PATH = "products_v2.db" 
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
@@ -162,7 +160,6 @@ def send_flex_message(items):
             display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
             display_img = img_url if img_url else DEFAULT_LOGO_URL
 
-            # --- 最もエラーが起きにくい安定版（黒文字統一）のテキスト構成 ---
             bubble = {
                 "type": "bubble",
                 "hero": {
@@ -221,6 +218,9 @@ def send_flex_message(items):
         response = requests.post(url, headers=headers, json=payload)
         if response.status_code == 200:
             log(f"[INFO] LINE画像付きFlex通知送信成功 ({len(chunk)}件)")
+        elif response.status_code == 429:
+            log("[ERROR] 今月分のLINE通知上限（200通）に到達しました。翌月まで通知は送信されません。")
+            all_success = False
         else:
             log(f"[ERROR] LINE通知送信失敗: {response.status_code} {response.text}")
             all_success = False
@@ -254,6 +254,9 @@ def send_summary_message(new_items):
     if response.status_code == 200:
         log("[INFO] サマリー通知を送信しました。")
         return True
+    elif response.status_code == 429:
+        log("[ERROR] 今月分のLINE通知上限（200通）に到達しました。翌月まで通知は送信されません。")
+        return False
     else:
         log(f"[ERROR] サマリー通知送信失敗: {response.status_code} {response.text}")
         return False
@@ -313,13 +316,10 @@ def main():
 
     prev_keys = get_previous_snapshot()
 
-    # --- 強制リセット時の動き ---
     if not prev_keys:
         log(f"[INFO] データベース初期化: 現在の最新{len(all_items)}件を記憶します。")
         save_snapshot(all_items)
         log("[INFO] 初期化完了。次回から追加・更新分のみ画像付きで通知します。")
-        
-        # リセットに成功し、LINEが動いている証明のテストメッセージを送る
         send_test_message()
         return
 
