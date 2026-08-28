@@ -129,8 +129,9 @@ def send_flex_message(items):
     """LINE Flex Message 送信"""
     if not LINE_ACCESS_TOKEN:
         log("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
-        return
+        return False
 
+    all_success = True
     chunk_size = 5 
     for i in range(0, len(items), chunk_size):
         chunk = items[i:i + chunk_size]
@@ -145,29 +146,36 @@ def send_flex_message(items):
             display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
             display_img = img_url if img_url else DEFAULT_LOGO_URL
 
-            # --- 文字色分けロジック（LINE Flex Span機能） ---
+            # --- 堅牢なテキストコンポーネントの生成 ---
+            text_component = {
+                "type": "text",
+                "size": "md",
+                "wrap": True,
+                "weight": "bold"
+            }
+
             match = re.match(r'^(NEW|再入荷|販売|予約)\s*(.*)', display_title, re.IGNORECASE)
             if match:
-                label = match.group(1)
+                label_text = match.group(1)
                 rest_text = match.group(2)
                 
-                if label.upper() == "NEW":
+                if label_text.upper() == "NEW":
                     label_color = "#FF0000"  # 赤
-                elif label == "販売":
+                elif label_text == "販売":
                     label_color = "#FF00FF"  # ピンク
-                elif label == "再入荷":
+                elif label_text == "再入荷":
                     label_color = "#0066CC"  # 青
                 else:
-                    label_color = "#000000"  # その他（予約など）は黒
+                    label_color = "#000000"  # 黒
                     
-                spans = [
-                    {"type": "span", "text": f"{label} ", "color": label_color, "weight": "bold"},
-                    {"type": "span", "text": rest_text, "color": "#000000", "weight": "bold"}
-                ]
+                spans = [{"type": "span", "text": f"{label_text} ", "color": label_color}]
+                # 空文字によるLINE APIエラーを防ぐ
+                if rest_text:
+                    spans.append({"type": "span", "text": rest_text, "color": "#000000"})
+                
+                text_component["contents"] = spans
             else:
-                spans = [
-                    {"type": "span", "text": display_title, "color": "#000000", "weight": "bold"}
-                ]
+                text_component["text"] = display_title
 
             bubble = {
                 "type": "bubble",
@@ -182,12 +190,7 @@ def send_flex_message(items):
                     "type": "box",
                     "layout": "vertical",
                     "contents": [
-                        {
-                            "type": "text",
-                            "contents": spans,
-                            "size": "md",
-                            "wrap": True
-                        }
+                        text_component
                     ]
                 },
                 "footer": {
@@ -228,11 +231,14 @@ def send_flex_message(items):
             log(f"[INFO] LINE画像付きFlex通知送信成功 ({len(chunk)}件)")
         else:
             log(f"[ERROR] LINE通知送信失敗: {response.status_code} {response.text}")
+            all_success = False
+
+    return all_success
 
 def send_summary_message(new_items):
     """大量更新時にメッセージ枠を守りつつ概要だけを1通で通知する"""
     if not LINE_ACCESS_TOKEN:
-        return
+        return False
     
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
@@ -252,8 +258,13 @@ def send_summary_message(new_items):
     payload = {
         "messages": [{"type": "text", "text": text}]
     }
-    requests.post(url, headers=headers, json=payload)
-    log("[INFO] サマリー通知を送信しました。")
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code == 200:
+        log("[INFO] サマリー通知を送信しました。")
+        return True
+    else:
+        log(f"[ERROR] サマリー通知送信失敗: {response.status_code} {response.text}")
+        return False
 
 def get_top_information_items(soup):
     """div.info エリアから全テキストをシンプルかつ確実に取得（上限MAX_TRACK_LIMIT件）"""
@@ -301,7 +312,6 @@ def main():
         log(f"[ERROR] Webサイトの取得に失敗しました: {e}")
         return
 
-    # 現在のサイトの最新リストを取得
     all_items = get_top_information_items(soup)
     log(f"[DEBUG] 監視対象とする上位最新データ件数: {len(all_items)}件")
 
@@ -309,7 +319,6 @@ def main():
         log("[INFO] INFORMATION枠内に商品が見つかりませんでした。")
         return
 
-    # DBから前回のリストを取得
     prev_keys = get_previous_snapshot()
 
     if not prev_keys:
@@ -321,36 +330,31 @@ def main():
     new_items = []
     existing_items_in_curr = []
     
-    # 1. 完全な新規追加の検知と、既存アイテムの相対位置チェック準備
     for i, (title, url, item_key) in enumerate(all_items):
         if item_key not in prev_keys:
-            # 前回どこにも存在しなかった完全な新規
             new_items.append((title, url, item_key, i))
             log(f"[DEBUG] 新規追加検知: {title}")
         else:
             prev_rank = prev_keys.index(item_key)
             existing_items_in_curr.append((i, prev_rank, title, url, item_key))
 
-    # 2. 上積み（再浮上）検知：相対的な順位の「追い抜き」を判定
     for idx, (curr_rank, prev_rank, title, url, item_key) in enumerate(existing_items_in_curr):
-        # 自分より現在の順位が「下」にあるアイテムたちの、過去の順位を取得
         rest_prev_ranks = [item[1] for item in existing_items_in_curr[idx+1:]]
         if rest_prev_ranks:
             min_prev_in_rest = min(rest_prev_ranks)
-            # 過去に自分より上位だったアイテムをごぼう抜きして上にいる = 明示的に上に積まれた
             if prev_rank > min_prev_in_rest:
                 new_items.append((title, url, item_key, curr_rank))
                 log(f"[DEBUG] 再浮上（上積み）検知: {title} (前回{prev_rank}位 -> 今回{curr_rank}位)")
 
-    # サイトの表示順（上から順）に通知を整理
     new_items = sorted(new_items, key=lambda x: x[3])
-
     log(f"[DEBUG] 検知された新規・再入荷件数: {len(new_items)}件")
+
+    notify_success = True
 
     if new_items:
         if len(new_items) > MAX_NOTIFY_LIMIT:
             log(f"[WARN] 検知が{len(new_items)}件と多いため、LINE通知枠保護により個別送信をスキップし、サマリー通知を送信します。")
-            send_summary_message(new_items)
+            notify_success = send_summary_message(new_items)
         else:
             processed_items = []
             for title, url, item_key, rank in new_items:
@@ -363,13 +367,16 @@ def main():
                     processed_items.append((title, url, DEFAULT_LOGO_URL, item_key))
 
             if processed_items:
-                send_flex_message(processed_items)
+                notify_success = send_flex_message(processed_items)
     else:
         log("[INFO] INFORMATION内に新しい未通知商品はありませんでした。")
 
-    # 処理がすべて終わったら、現在の状態を次回の比較用（スナップショット）としてDBに上書き保存
-    save_snapshot(all_items)
-    log("--- 処理が正常に完了しました ---")
+    # --- DB更新ストッパー（安全装置） ---
+    if notify_success:
+        save_snapshot(all_items)
+        log("--- 処理が正常に完了しました ---")
+    else:
+        log("[WARN] LINE通知に失敗したため、次回の再試行のためにデータベースの更新をスキップしました。")
 
 if __name__ == "__main__":
     main()
