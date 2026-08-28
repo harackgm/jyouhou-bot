@@ -8,7 +8,9 @@ from datetime import datetime, timezone, timedelta
 
 TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://fishing-shop-jh.com/img/logo.png"
-DB_PATH = "products.db"
+
+# 【重要】DBファイル名を変更し、バグった記憶を強制的に捨てて新品に交換します
+DB_PATH = "products_v2.db" 
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 # --- 安全装置の設定 ---
@@ -125,8 +127,22 @@ def fetch_product_image_url(target_url, headers):
 
     return DEFAULT_LOGO_URL
 
+def send_test_message():
+    """システム復旧を知らせる1回限りのテスト通知"""
+    if not LINE_ACCESS_TOKEN: return
+    url = "https://api.line.me/v2/bot/message/broadcast"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
+    }
+    payload = {
+        "messages": [{"type": "text", "text": "✅ 【城峰釣具店監視Bot】\nシステムの復旧・初期化が完了しました。\nデータベースをリセットし、最も安定した旧デザインで監視を再開します。\n次回の商品更新から画像付きで通知されます。"}]
+    }
+    requests.post(url, headers=headers, json=payload)
+    log("[INFO] 復旧確認用のテストメッセージをLINEへ送信しました。")
+
 def send_flex_message(items):
-    """LINE Flex Message 送信"""
+    """LINE Flex Message 送信（安定版デザイン）"""
     if not LINE_ACCESS_TOKEN:
         log("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return False
@@ -146,37 +162,7 @@ def send_flex_message(items):
             display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
             display_img = img_url if img_url else DEFAULT_LOGO_URL
 
-            # --- 堅牢なテキストコンポーネントの生成 ---
-            text_component = {
-                "type": "text",
-                "size": "md",
-                "wrap": True,
-                "weight": "bold"
-            }
-
-            match = re.match(r'^(NEW|再入荷|販売|予約)\s*(.*)', display_title, re.IGNORECASE)
-            if match:
-                label_text = match.group(1)
-                rest_text = match.group(2)
-                
-                if label_text.upper() == "NEW":
-                    label_color = "#FF0000"  # 赤
-                elif label_text == "販売":
-                    label_color = "#FF00FF"  # ピンク
-                elif label_text == "再入荷":
-                    label_color = "#0066CC"  # 青
-                else:
-                    label_color = "#000000"  # 黒
-                    
-                spans = [{"type": "span", "text": f"{label_text} ", "color": label_color}]
-                # 空文字によるLINE APIエラーを防ぐ
-                if rest_text:
-                    spans.append({"type": "span", "text": rest_text, "color": "#000000"})
-                
-                text_component["contents"] = spans
-            else:
-                text_component["text"] = display_title
-
+            # --- 最もエラーが起きにくい安定版（黒文字統一）のテキスト構成 ---
             bubble = {
                 "type": "bubble",
                 "hero": {
@@ -190,7 +176,13 @@ def send_flex_message(items):
                     "type": "box",
                     "layout": "vertical",
                     "contents": [
-                        text_component
+                        {
+                            "type": "text",
+                            "text": display_title,
+                            "size": "md",
+                            "wrap": True,
+                            "weight": "bold"
+                        }
                     ]
                 },
                 "footer": {
@@ -321,10 +313,14 @@ def main():
 
     prev_keys = get_previous_snapshot()
 
+    # --- 強制リセット時の動き ---
     if not prev_keys:
-        log(f"[INFO] 初回データベース初期化: 最新{len(all_items)}件を記憶します。")
+        log(f"[INFO] データベース初期化: 現在の最新{len(all_items)}件を記憶します。")
         save_snapshot(all_items)
-        log("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
+        log("[INFO] 初期化完了。次回から追加・更新分のみ画像付きで通知します。")
+        
+        # リセットに成功し、LINEが動いている証明のテストメッセージを送る
+        send_test_message()
         return
 
     new_items = []
@@ -371,7 +367,6 @@ def main():
     else:
         log("[INFO] INFORMATION内に新しい未通知商品はありませんでした。")
 
-    # --- DB更新ストッパー（安全装置） ---
     if notify_success:
         save_snapshot(all_items)
         log("--- 処理が正常に完了しました ---")
