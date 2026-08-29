@@ -8,7 +8,9 @@ from datetime import datetime, timezone, timedelta
 
 TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://fishing-shop-jh.com/img/logo.png"
-DB_PATH = "products_v2.db" 
+
+# ファイル名は元に戻し、GitHub Actionsに正しく保存（コミット）させます
+DB_PATH = "products.db" 
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 # --- 安全装置の設定 ---
@@ -29,11 +31,11 @@ def generate_item_key(title, url):
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
 def init_db():
-    """DBの初期化（上積み検知用のスナップショットテーブル）"""
+    """DBの初期化（内部のテーブル名をv2にしてバグデータを回避）"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS snapshot (
+        CREATE TABLE IF NOT EXISTS snapshot_v2 (
             rank INTEGER PRIMARY KEY,
             item_key TEXT,
             title TEXT,
@@ -47,7 +49,7 @@ def get_previous_snapshot():
     """前回の監視リスト（キーの配列）を順位順に取得"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT item_key FROM snapshot ORDER BY rank ASC')
+    cursor.execute('SELECT item_key FROM snapshot_v2 ORDER BY rank ASC')
     keys = [row[0] for row in cursor.fetchall()]
     conn.close()
     return keys
@@ -56,9 +58,9 @@ def save_snapshot(items):
     """今回の監視リストをDBに上書き保存"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM snapshot')
+    cursor.execute('DELETE FROM snapshot_v2')
     for rank, (title, url, item_key) in enumerate(items):
-        cursor.execute('INSERT INTO snapshot (rank, item_key, title, url) VALUES (?, ?, ?, ?)', 
+        cursor.execute('INSERT INTO snapshot_v2 (rank, item_key, title, url) VALUES (?, ?, ?, ?)', 
                        (rank, item_key, title, url))
     conn.commit()
     conn.close()
@@ -124,20 +126,6 @@ def fetch_product_image_url(target_url, headers):
         log(f"[ERROR] 画像検索巡回エラー ({target_url}): {e}")
 
     return DEFAULT_LOGO_URL
-
-def send_test_message():
-    """システム復旧を知らせる1回限りのテスト通知"""
-    if not LINE_ACCESS_TOKEN: return
-    url = "https://api.line.me/v2/bot/message/broadcast"
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
-    }
-    payload = {
-        "messages": [{"type": "text", "text": "✅ 【城峰釣具店監視Bot】\nシステムの復旧・初期化が完了しました。\nデータベースをリセットし、最も安定した旧デザインで監視を再開します。\n次回の商品更新から画像付きで通知されます。"}]
-    }
-    requests.post(url, headers=headers, json=payload)
-    log("[INFO] 復旧確認用のテストメッセージをLINEへ送信しました。")
 
 def send_flex_message(items):
     """LINE Flex Message 送信（安定版デザイン）"""
@@ -320,7 +308,6 @@ def main():
         log(f"[INFO] データベース初期化: 現在の最新{len(all_items)}件を記憶します。")
         save_snapshot(all_items)
         log("[INFO] 初期化完了。次回から追加・更新分のみ画像付きで通知します。")
-        send_test_message()
         return
 
     new_items = []
