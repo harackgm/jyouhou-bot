@@ -9,12 +9,11 @@ from datetime import datetime, timezone, timedelta
 TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://fishing-shop-jh.com/img/logo.png"
 
-# ファイル名は元に戻し、GitHub Actionsに正しく保存（コミット）させます
 DB_PATH = "products.db" 
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 # --- 安全装置の設定 ---
-MAX_NOTIFY_LIMIT = 20  # 大量検知時の事故防止ガード
+MAX_NOTIFY_LIMIT = 24  # 拡張: 最大24件まではカルーセル通知（超えるとサマリー通知へ）
 MAX_TRACK_LIMIT = 50   # DBに記憶しておく件数
 
 # --- 日本時間(JST)の設定 ---
@@ -31,7 +30,7 @@ def generate_item_key(title, url):
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
 def init_db():
-    """DBの初期化（内部のテーブル名をv2にしてバグデータを回避）"""
+    """DBの初期化"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -128,21 +127,30 @@ def fetch_product_image_url(target_url, headers):
     return DEFAULT_LOGO_URL
 
 def send_flex_message(items):
-    """LINE Flex Message 送信（安定版デザイン）"""
+    """LINE Flex Message 送信（可変カルーセル＆通信節約版）"""
     if not LINE_ACCESS_TOKEN:
         log("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return False
 
-    all_success = True
-    chunk_size = 5 
-    for i in range(0, len(items), chunk_size):
-        chunk = items[i:i + chunk_size]
-        url = "https://api.line.me/v2/bot/message/broadcast"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
-        }
+    total_items = len(items)
+    
+    # 溜まった件数に応じて1カルーセルあたりの件数を自動変更
+    if total_items > 15:
+        chunk_size = 12  # 16〜24件の場合は最大12件×2通知
+    else:
+        chunk_size = 5   # 15件以下の場合は最大5件×3通知
 
+    url = "https://api.line.me/v2/bot/message/broadcast"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
+    }
+
+    # 複数カルーセルを1回のAPIリクエストに同梱するためのリスト
+    messages_payload = []
+
+    for i in range(0, total_items, chunk_size):
+        chunk = items[i:i + chunk_size]
         bubbles = []
         for title, product_url, img_url, _ in chunk:
             display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
@@ -190,30 +198,29 @@ def send_flex_message(items):
             }
             bubbles.append(bubble)
 
-        payload = {
-            "messages": [
-                {
-                    "type": "flex",
-                    "altText": f"城峰釣具店 INFORMATION新着通知 ({len(chunk)}件)",
-                    "contents": {
-                        "type": "carousel",
-                        "contents": bubbles
-                    }
-                }
-            ]
+        flex_msg = {
+            "type": "flex",
+            "altText": f"城峰釣具店 新着通知 ({len(chunk)}件)",
+            "contents": {
+                "type": "carousel",
+                "contents": bubbles
+            }
         }
+        messages_payload.append(flex_msg)
 
-        response = requests.post(url, headers=headers, json=payload)
-        if response.status_code == 200:
-            log(f"[INFO] LINE画像付きFlex通知送信成功 ({len(chunk)}件)")
-        elif response.status_code == 429:
-            log("[ERROR] 今月分のLINE通知上限（200通）に到達しました。翌月まで通知は送信されません。")
-            all_success = False
-        else:
-            log(f"[ERROR] LINE通知送信失敗: {response.status_code} {response.text}")
-            all_success = False
-
-    return all_success
+    # 組み立てたカルーセルを1回の通信でまとめて送信（送信枠の大幅節約）
+    payload = {"messages": messages_payload}
+    
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code == 200:
+        log(f"[INFO] LINE画像付きFlex通知送信成功 (計{total_items}件 / カルーセル数:{len(messages_payload)})")
+        return True
+    elif response.status_code == 429:
+        log("[ERROR] 今月分のLINE通知上限（200通）に到達しました。翌月まで通知は送信されません。")
+        return False
+    else:
+        log(f"[ERROR] LINE通知送信失敗: {response.status_code} {response.text}")
+        return False
 
 def send_summary_message(new_items):
     """大量更新時にメッセージ枠を守りつつ概要だけを1通で通知する"""
