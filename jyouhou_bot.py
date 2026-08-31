@@ -30,7 +30,7 @@ def generate_item_key(title, url):
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
 def init_db():
-    """DBの初期化"""
+    """DBの初期化（制限ステータス管理を追加）"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('''
@@ -41,6 +41,30 @@ def init_db():
             url TEXT
         )
     ''')
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS system_status (
+            id INTEGER PRIMARY KEY,
+            is_limited INTEGER
+        )
+    ''')
+    cursor.execute('INSERT OR IGNORE INTO system_status (id, is_limited) VALUES (1, 0)')
+    conn.commit()
+    conn.close()
+
+def get_system_status():
+    """通信制限中フラグを取得"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT is_limited FROM system_status WHERE id = 1')
+    res = cursor.fetchone()
+    conn.close()
+    return res[0] if res else 0
+
+def set_system_status(is_limited):
+    """通信制限中フラグを更新"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('UPDATE system_status SET is_limited = ? WHERE id = 1', (is_limited,))
     conn.commit()
     conn.close()
 
@@ -132,13 +156,13 @@ def send_flex_message(items):
         log("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return False
 
+    is_recovery = get_system_status()
     total_items = len(items)
     
-    # 溜まった件数に応じて1カルーセルあたりの件数を自動変更
     if total_items > 15:
-        chunk_size = 12  # 16〜24件の場合は最大12件×2通知
+        chunk_size = 12
     else:
-        chunk_size = 5   # 15件以下の場合は最大5件×3通知
+        chunk_size = 5
 
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
@@ -146,8 +170,14 @@ def send_flex_message(items):
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
     }
 
-    # 複数カルーセルを1回のAPIリクエストに同梱するためのリスト
     messages_payload = []
+
+    # 制限解除による送信の場合、案内メッセージを先頭に追加
+    if is_recovery == 1:
+        messages_payload.append({
+            "type": "text",
+            "text": "【システム通知】\n月間のLINE通信制限がリセットされたため、保留されていた新着情報をお届けします。"
+        })
 
     for i in range(0, total_items, chunk_size):
         chunk = items[i:i + chunk_size]
@@ -208,15 +238,16 @@ def send_flex_message(items):
         }
         messages_payload.append(flex_msg)
 
-    # 組み立てたカルーセルを1回の通信でまとめて送信（送信枠の大幅節約）
     payload = {"messages": messages_payload}
     
     response = requests.post(url, headers=headers, json=payload)
     if response.status_code == 200:
         log(f"[INFO] LINE画像付きFlex通知送信成功 (計{total_items}件 / カルーセル数:{len(messages_payload)})")
+        set_system_status(0)  # 送信成功でフラグをクリア
         return True
     elif response.status_code == 429:
         log("[ERROR] 今月分のLINE通知上限（200通）に到達しました。翌月まで通知は送信されません。")
+        set_system_status(1)  # 制限フラグをオンにする
         return False
     else:
         log(f"[ERROR] LINE通知送信失敗: {response.status_code} {response.text}")
@@ -227,6 +258,7 @@ def send_summary_message(new_items):
     if not LINE_ACCESS_TOKEN:
         return False
     
+    is_recovery = get_system_status()
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
         "Content-Type": "application/json",
@@ -236,7 +268,9 @@ def send_summary_message(new_items):
     sample_texts = "\n".join([f"・{title}" for title, _, _, _ in new_items[:5]])
     more_text = f"\n...他 {len(new_items) - 5}件" if len(new_items) > 5 else ""
     
-    text = (f"⚠️ 【城峰釣具店】更新アラート ⚠️\n"
+    recovery_text = "【システム通知】\n月間のLINE通信制限がリセットされたため、保留されていた情報をお届けします。\n\n" if is_recovery == 1 else ""
+    
+    text = (f"{recovery_text}⚠️ 【城峰釣具店】更新アラート ⚠️\n"
             f"一気に {len(new_items)} 件の新着・再入荷が検知されました。\n"
             f"※大量通知防止ガードが作動したため、個別画像通知をスキップしました。\n\n"
             f"【更新内容の一部】\n{sample_texts}{more_text}\n\n"
@@ -248,16 +282,18 @@ def send_summary_message(new_items):
     response = requests.post(url, headers=headers, json=payload)
     if response.status_code == 200:
         log("[INFO] サマリー通知を送信しました。")
+        set_system_status(0)
         return True
     elif response.status_code == 429:
         log("[ERROR] 今月分のLINE通知上限（200通）に到達しました。翌月まで通知は送信されません。")
+        set_system_status(1)
         return False
     else:
         log(f"[ERROR] サマリー通知送信失敗: {response.status_code} {response.text}")
         return False
 
 def get_top_information_items(soup):
-    """div.info エリアから全テキストをシンプルかつ確実に取得（上限MAX_TRACK_LIMIT件）"""
+    """div.info エリアから全テキストをシンプルかつ確実に取得"""
     info_div = soup.find("div", class_="info")
     if not info_div:
         log("[WARN] div.info が見つかりませんでした。")
@@ -287,6 +323,13 @@ def get_top_information_items(soup):
     return items
 
 def main():
+    # --- 深夜スリープ機能（サーバー負荷軽減と深夜通知防止） ---
+    current_hour = datetime.now(JST).hour
+    if 0 <= current_hour < 8:
+        log("深夜帯（0:00〜7:59）のため、サーバー負荷軽減と深夜通知防止のため監視をスキップします。")
+        return
+    # -------------------------------------------------------------
+
     init_db()
     log("城峰釣具店 (INFORMATION監視) を開始します...")
 
