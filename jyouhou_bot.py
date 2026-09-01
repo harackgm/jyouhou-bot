@@ -13,34 +13,49 @@ DB_PATH = "products.db"
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 # --- 安全装置の設定 ---
-MAX_NOTIFY_LIMIT = 24  # 拡張: 最大24件まではカルーセル通知（超えるとサマリー通知へ）
-MAX_TRACK_LIMIT = 50   # DBに記憶しておく件数
+MAX_NOTIFY_LIMIT = 24  
+MAX_TRACK_LIMIT = 50   
 
 # --- 日本時間(JST)の設定 ---
 JST = timezone(timedelta(hours=+9), 'JST')
 
 def log(msg):
-    """JSTのタイムスタンプ付きでログを出力する"""
     now = datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')
     print(f"[{now}] {msg}")
 
 def generate_item_key(title, url):
-    """タイトルとURLの組み合わせから一意の識別キーを生成"""
     raw_str = f"{title.strip()}_{url.strip()}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
 def init_db():
-    """DBの初期化（制限ステータス管理を追加）"""
+    """DBの初期化と、新構造(snapshot_v3)への安全なデータ移行"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    
+    # 状態管理（status）を追加した新テーブルを作成
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS snapshot_v2 (
+        CREATE TABLE IF NOT EXISTS snapshot_v3 (
             rank INTEGER PRIMARY KEY,
             item_key TEXT,
             title TEXT,
-            url TEXT
+            url TEXT,
+            status TEXT
         )
     ''')
+    
+    # v3が空の場合、既存のv2データがあれば安全に引き継ぐ（通知爆発の防止）
+    cursor.execute('SELECT COUNT(*) FROM snapshot_v3')
+    if cursor.fetchone()[0] == 0:
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='snapshot_v2'")
+        if cursor.fetchone():
+            cursor.execute('SELECT rank, item_key, title, url FROM snapshot_v2')
+            for r in cursor.fetchall():
+                # 過去の既読データはすべて「本掲載完了(full)」として引き継ぐ
+                cursor.execute('INSERT INTO snapshot_v3 (rank, item_key, title, url, status) VALUES (?, ?, ?, ?, ?)', 
+                               (r[0], r[1], r[2], r[3], 'full'))
+            log("[INFO] データベース構造をv3(2段階通知対応)に安全にアップグレードしました。")
+
+    # 制限ステータス管理
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS system_status (
             id INTEGER PRIMARY KEY,
@@ -52,7 +67,6 @@ def init_db():
     conn.close()
 
 def get_system_status():
-    """通信制限中フラグを取得"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('SELECT is_limited FROM system_status WHERE id = 1')
@@ -61,7 +75,6 @@ def get_system_status():
     return res[0] if res else 0
 
 def set_system_status(is_limited):
-    """通信制限中フラグを更新"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('UPDATE system_status SET is_limited = ? WHERE id = 1', (is_limited,))
@@ -69,27 +82,26 @@ def set_system_status(is_limited):
     conn.close()
 
 def get_previous_snapshot():
-    """前回の監視リスト（キーの配列）を順位順に取得"""
+    """前回の監視リストを辞書型 {item_key: (rank, status)} で取得"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT item_key FROM snapshot_v2 ORDER BY rank ASC')
-    keys = [row[0] for row in cursor.fetchall()]
+    cursor.execute('SELECT item_key, rank, status FROM snapshot_v3 ORDER BY rank ASC')
+    data = {row[0]: (row[1], row[2]) for row in cursor.fetchall()}
     conn.close()
-    return keys
+    return data
 
-def save_snapshot(items):
-    """今回の監視リストをDBに上書き保存"""
+def save_snapshot(snapshot_data):
+    """今回の監視リスト(title, url, item_key, status)をDBに保存"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM snapshot_v2')
-    for rank, (title, url, item_key) in enumerate(items):
-        cursor.execute('INSERT INTO snapshot_v2 (rank, item_key, title, url) VALUES (?, ?, ?, ?)', 
-                       (rank, item_key, title, url))
+    cursor.execute('DELETE FROM snapshot_v3')
+    for rank, (title, url, item_key, status) in enumerate(snapshot_data):
+        cursor.execute('INSERT INTO snapshot_v3 (rank, item_key, title, url, status) VALUES (?, ?, ?, ?, ?)', 
+                       (rank, item_key, title, url, status))
     conn.commit()
     conn.close()
 
 def clean_image_url(raw_url):
-    """画像URL整形"""
     if not raw_url:
         return DEFAULT_LOGO_URL
     if raw_url.startswith("//"):
@@ -102,7 +114,6 @@ def clean_image_url(raw_url):
     return clean_url
 
 def extract_image_from_detail_page(detail_url, headers):
-    """商品詳細ページから画像を抽出"""
     try:
         res = requests.get(detail_url, headers=headers, timeout=10)
         res.encoding = res.apparent_encoding
@@ -128,7 +139,6 @@ def extract_image_from_detail_page(detail_url, headers):
     return None
 
 def fetch_product_image_url(target_url, headers):
-    """階層を辿って商品画像を取得"""
     try:
         res = requests.get(target_url, headers=headers, timeout=10)
         res.encoding = res.apparent_encoding
@@ -144,25 +154,28 @@ def fetch_product_image_url(target_url, headers):
             img_url = extract_image_from_detail_page(deep_url, headers)
             if img_url:
                 return clean_image_url(img_url)
-
     except Exception as e:
         log(f"[ERROR] 画像検索巡回エラー ({target_url}): {e}")
-
     return DEFAULT_LOGO_URL
 
+def check_is_pre_announcement(url, headers):
+    """商品ページが準備中（フライング掲載）かどうかを判定"""
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        res.encoding = res.apparent_encoding
+        return "現在、この商品は扱っておりません。" in res.text
+    except Exception as e:
+        log(f"[ERROR] 準備中チェックエラー ({url}): {e}")
+        return True  # 判定エラー時は安全のためプレ状態として扱う
+
 def send_flex_message(items):
-    """LINE Flex Message 送信（可変カルーセル＆通信節約版）"""
     if not LINE_ACCESS_TOKEN:
         log("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return False
 
     is_recovery = get_system_status()
     total_items = len(items)
-    
-    if total_items > 15:
-        chunk_size = 12
-    else:
-        chunk_size = 5
+    chunk_size = 12 if total_items > 15 else 5
 
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
@@ -172,7 +185,6 @@ def send_flex_message(items):
 
     messages_payload = []
 
-    # 制限解除による送信の場合、案内メッセージを先頭に追加
     if is_recovery == 1:
         messages_payload.append({
             "type": "text",
@@ -243,18 +255,17 @@ def send_flex_message(items):
     response = requests.post(url, headers=headers, json=payload)
     if response.status_code == 200:
         log(f"[INFO] LINE画像付きFlex通知送信成功 (計{total_items}件 / カルーセル数:{len(messages_payload)})")
-        set_system_status(0)  # 送信成功でフラグをクリア
+        set_system_status(0)
         return True
     elif response.status_code == 429:
         log("[ERROR] 今月分のLINE通知上限（200通）に到達しました。翌月まで通知は送信されません。")
-        set_system_status(1)  # 制限フラグをオンにする
+        set_system_status(1)
         return False
     else:
         log(f"[ERROR] LINE通知送信失敗: {response.status_code} {response.text}")
         return False
 
 def send_summary_message(new_items):
-    """大量更新時にメッセージ枠を守りつつ概要だけを1通で通知する"""
     if not LINE_ACCESS_TOKEN:
         return False
     
@@ -265,13 +276,13 @@ def send_summary_message(new_items):
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
     }
     
-    sample_texts = "\n".join([f"・{title}" for title, _, _, _ in new_items[:5]])
+    sample_texts = "\n".join([f"・{title}" for title, _, _, _, _ in new_items[:5]])
     more_text = f"\n...他 {len(new_items) - 5}件" if len(new_items) > 5 else ""
     
     recovery_text = "【システム通知】\n月間のLINE通信制限がリセットされたため、保留されていた情報をお届けします。\n\n" if is_recovery == 1 else ""
     
     text = (f"{recovery_text}⚠️ 【城峰釣具店】更新アラート ⚠️\n"
-            f"一気に {len(new_items)} 件の新着・再入荷が検知されました。\n"
+            f"一気に {len(new_items)} 件の更新が検知されました。\n"
             f"※大量通知防止ガードが作動したため、個別画像通知をスキップしました。\n\n"
             f"【更新内容の一部】\n{sample_texts}{more_text}\n\n"
             f"▼詳細はサイトをご確認ください\n{TARGET_URL}")
@@ -293,7 +304,6 @@ def send_summary_message(new_items):
         return False
 
 def get_top_information_items(soup):
-    """div.info エリアから全テキストをシンプルかつ確実に取得"""
     info_div = soup.find("div", class_="info")
     if not info_div:
         log("[WARN] div.info が見つかりませんでした。")
@@ -304,7 +314,6 @@ def get_top_information_items(soup):
 
     for a_tag in info_div.find_all("a", href=True):
         href = a_tag["href"]
-        
         full_title = re.sub(r'\s+', ' ', a_tag.get_text(strip=True))
 
         if not href or len(full_title) <= 2:
@@ -316,19 +325,15 @@ def get_top_information_items(soup):
         if item_key not in seen_keys:
             items.append((full_title, full_url, item_key))
             seen_keys.add(item_key)
-            
             if len(items) >= MAX_TRACK_LIMIT:
                 break
-
     return items
 
 def main():
-    # --- 深夜スリープ機能（サーバー負荷軽減と深夜通知防止） ---
     current_hour = datetime.now(JST).hour
     if 0 <= current_hour < 8:
         log("深夜帯（0:00〜7:59）のため、サーバー負荷軽減と深夜通知防止のため監視をスキップします。")
         return
-    # -------------------------------------------------------------
 
     init_db()
     log("城峰釣具店 (INFORMATION監視) を開始します...")
@@ -352,60 +357,93 @@ def main():
         log("[INFO] INFORMATION枠内に商品が見つかりませんでした。")
         return
 
-    prev_keys = get_previous_snapshot()
+    prev_snapshot = get_previous_snapshot()
 
-    if not prev_keys:
-        log(f"[INFO] データベース初期化: 現在の最新{len(all_items)}件を記憶します。")
-        save_snapshot(all_items)
-        log("[INFO] 初期化完了。次回から追加・更新分のみ画像付きで通知します。")
+    if not prev_snapshot:
+        log(f"[INFO] データベース初期化: 現在の最新{len(all_items)}件をすべて本掲載扱いとして記憶します。")
+        initial_data = [(title, url, item_key, 'full') for _, (title, url, item_key) in enumerate(all_items)]
+        save_snapshot(initial_data)
+        log("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
         return
 
-    new_items = []
-    existing_items_in_curr = []
+    items_to_notify = []        # 通知用リスト (title, url, item_key, rank, notify_type)
+    next_snapshot_data = []     # 次回用の記憶リスト (title, url, item_key, status)
+    existing_full_items = []    # 再浮上チェック用
     
-    for i, (title, url, item_key) in enumerate(all_items):
-        if item_key not in prev_keys:
-            new_items.append((title, url, item_key, i))
-            log(f"[DEBUG] 新規追加検知: {title}")
+    for curr_rank, (title, url, item_key) in enumerate(all_items):
+        if item_key not in prev_snapshot:
+            # 新規商品を発見
+            is_pre = check_is_pre_announcement(url, headers)
+            status = 'pre' if is_pre else 'full'
+            notify_type = 'pre_new' if is_pre else 'full_new'
+            
+            items_to_notify.append((title, url, item_key, curr_rank, notify_type))
+            next_snapshot_data.append((title, url, item_key, status))
+            log(f"[DEBUG] 新規追加検知: {title} (状態: {status})")
+            
         else:
-            prev_rank = prev_keys.index(item_key)
-            existing_items_in_curr.append((i, prev_rank, title, url, item_key))
+            prev_rank, prev_status = prev_snapshot[item_key]
+            
+            if prev_status == 'pre':
+                # 前回「写真待ち」だった商品を再チェック
+                is_pre = check_is_pre_announcement(url, headers)
+                if is_pre:
+                    # まだ準備中（スルーして記憶のみ維持）
+                    next_snapshot_data.append((title, url, item_key, 'pre'))
+                else:
+                    # 本掲載に昇格した！
+                    notify_type = 'full_upgrade'
+                    items_to_notify.append((title, url, item_key, curr_rank, notify_type))
+                    next_snapshot_data.append((title, url, item_key, 'full'))
+                    log(f"[DEBUG] 本掲載への昇格を検知: {title}")
+            else:
+                # 既に完了している商品はそのまま記憶
+                next_snapshot_data.append((title, url, item_key, 'full'))
+                existing_full_items.append((curr_rank, prev_rank, title, url, item_key))
 
-    for idx, (curr_rank, prev_rank, title, url, item_key) in enumerate(existing_items_in_curr):
-        rest_prev_ranks = [item[1] for item in existing_items_in_curr[idx+1:]]
+    # --- 再浮上（上積み）チェック ---
+    for idx, (curr_rank, prev_rank, title, url, item_key) in enumerate(existing_full_items):
+        rest_prev_ranks = [item[1] for item in existing_full_items[idx+1:]]
         if rest_prev_ranks:
             min_prev_in_rest = min(rest_prev_ranks)
             if prev_rank > min_prev_in_rest:
-                new_items.append((title, url, item_key, curr_rank))
+                items_to_notify.append((title, url, item_key, curr_rank, 'full_resurface'))
                 log(f"[DEBUG] 再浮上（上積み）検知: {title} (前回{prev_rank}位 -> 今回{curr_rank}位)")
 
-    new_items = sorted(new_items, key=lambda x: x[3])
-    log(f"[DEBUG] 検知された新規・再入荷件数: {len(new_items)}件")
+    items_to_notify = sorted(items_to_notify, key=lambda x: x[3])
+    log(f"[DEBUG] 抽出された通知対象: {len(items_to_notify)}件")
 
     notify_success = True
 
-    if new_items:
-        if len(new_items) > MAX_NOTIFY_LIMIT:
-            log(f"[WARN] 検知が{len(new_items)}件と多いため、LINE通知枠保護により個別送信をスキップし、サマリー通知を送信します。")
-            notify_success = send_summary_message(new_items)
+    if items_to_notify:
+        if len(items_to_notify) > MAX_NOTIFY_LIMIT:
+            log(f"[WARN] 検知が{len(items_to_notify)}件と多いため、LINE通知枠保護により個別送信をスキップし、サマリー通知を送信します。")
+            notify_success = send_summary_message(items_to_notify)
         else:
             processed_items = []
-            for title, url, item_key, rank in new_items:
-                log(f"[INFO] 新着商品処理中: {title}")
-                try:
+            for title, url, item_key, rank, notify_type in items_to_notify:
+                log(f"[INFO] 通知処理中: {title} (タイプ: {notify_type})")
+                
+                # 通知タイプに応じたタイトルの加工と画像の取得
+                if notify_type == 'pre_new':
+                    display_title = f"【事前告知(写真待)】 {title}"
+                    img_url = DEFAULT_LOGO_URL  # 通信節約のため画像取得をスキップ
+                elif notify_type == 'full_upgrade':
+                    display_title = f"【本掲載開始！】 {title}"
                     img_url = fetch_product_image_url(url, headers)
-                    processed_items.append((title, url, img_url, item_key))
-                except Exception as e:
-                    log(f"[ERROR] エラー発生 ({title}): {e}")
-                    processed_items.append((title, url, DEFAULT_LOGO_URL, item_key))
+                else:
+                    display_title = title
+                    img_url = fetch_product_image_url(url, headers)
+                    
+                processed_items.append((display_title, url, img_url, item_key))
 
             if processed_items:
                 notify_success = send_flex_message(processed_items)
     else:
-        log("[INFO] INFORMATION内に新しい未通知商品はありませんでした。")
+        log("[INFO] 新しい未通知商品、または本掲載への昇格はありませんでした。")
 
     if notify_success:
-        save_snapshot(all_items)
+        save_snapshot(next_snapshot_data)
         log("--- 処理が正常に完了しました ---")
     else:
         log("[WARN] LINE通知に失敗したため、次回の再試行のためにデータベースの更新をスキップしました。")
