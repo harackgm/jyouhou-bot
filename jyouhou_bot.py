@@ -9,6 +9,9 @@ from datetime import datetime, timezone, timedelta
 TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://fishing-shop-jh.com/img/logo.png"
 
+# GitHubにアップロードした「準備中」画像のRaw URL
+PRE_ANNOUNCEMENT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Jzyunbi.jpg"
+
 DB_PATH = "products.db" 
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
@@ -32,7 +35,6 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # 状態管理（status）を追加した新テーブルを作成
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS snapshot_v3 (
             rank INTEGER PRIMARY KEY,
@@ -43,19 +45,16 @@ def init_db():
         )
     ''')
     
-    # v3が空の場合、既存のv2データがあれば安全に引き継ぐ（通知爆発の防止）
     cursor.execute('SELECT COUNT(*) FROM snapshot_v3')
     if cursor.fetchone()[0] == 0:
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='snapshot_v2'")
         if cursor.fetchone():
             cursor.execute('SELECT rank, item_key, title, url FROM snapshot_v2')
             for r in cursor.fetchall():
-                # 過去の既読データはすべて「本掲載完了(full)」として引き継ぐ
                 cursor.execute('INSERT INTO snapshot_v3 (rank, item_key, title, url, status) VALUES (?, ?, ?, ?, ?)', 
                                (r[0], r[1], r[2], r[3], 'full'))
             log("[INFO] データベース構造をv3(2段階通知対応)に安全にアップグレードしました。")
 
-    # 制限ステータス管理
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS system_status (
             id INTEGER PRIMARY KEY,
@@ -163,7 +162,10 @@ def check_is_pre_announcement(url, headers):
     try:
         res = requests.get(url, headers=headers, timeout=10)
         res.encoding = res.apparent_encoding
-        return "現在、この商品は扱っておりません。" in res.text
+        text = res.text
+        if "現在、この商品は扱っておりません。" in text or "該当する商品がありません" in text:
+            return True
+        return False
     except Exception as e:
         log(f"[ERROR] 準備中チェックエラー ({url}): {e}")
         return True  # 判定エラー時は安全のためプレ状態として扱う
@@ -427,7 +429,7 @@ def main():
                 # 通知タイプに応じたタイトルの加工と画像の取得
                 if notify_type == 'pre_new':
                     display_title = f"【事前告知(写真待)】 {title}"
-                    img_url = DEFAULT_LOGO_URL  # 通信節約のため画像取得をスキップ
+                    img_url = PRE_ANNOUNCEMENT_IMAGE_URL  # ★ここでGitHub上の画像を適用
                 elif notify_type == 'full_upgrade':
                     display_title = f"【本掲載開始！】 {title}"
                     img_url = fetch_product_image_url(url, headers)
