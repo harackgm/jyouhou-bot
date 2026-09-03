@@ -8,8 +8,6 @@ from datetime import datetime, timezone, timedelta
 
 TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://fishing-shop-jh.com/img/logo.png"
-
-# GitHubにアップロードした「準備中」画像のRaw URL
 PRE_ANNOUNCEMENT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Jzyunbi.jpg"
 
 DB_PATH = "products.db" 
@@ -31,10 +29,8 @@ def generate_item_key(title, url):
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
 def init_db():
-    """DBの初期化と、新構造(snapshot_v3)への安全なデータ移行"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS snapshot_v3 (
             rank INTEGER PRIMARY KEY,
@@ -44,7 +40,6 @@ def init_db():
             status TEXT
         )
     ''')
-    
     cursor.execute('SELECT COUNT(*) FROM snapshot_v3')
     if cursor.fetchone()[0] == 0:
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='snapshot_v2'")
@@ -81,7 +76,6 @@ def set_system_status(is_limited):
     conn.close()
 
 def get_previous_snapshot():
-    """前回の監視リストを辞書型 {item_key: (rank, status)} で取得"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('SELECT item_key, rank, status FROM snapshot_v3 ORDER BY rank ASC')
@@ -90,7 +84,6 @@ def get_previous_snapshot():
     return data
 
 def save_snapshot(snapshot_data):
-    """今回の監視リスト(title, url, item_key, status)をDBに保存"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute('DELETE FROM snapshot_v3')
@@ -137,28 +130,37 @@ def extract_image_from_detail_page(detail_url, headers):
         log(f"[ERROR] 詳細ページ画像取得エラー ({detail_url}): {e}")
     return None
 
-def fetch_product_image_url(target_url, headers):
+def fetch_product_details(target_url, headers):
+    """画像URLと価格情報を同時に取得する（サーバー負荷を抑えるため統合）"""
+    img_url = DEFAULT_LOGO_URL
+    price_text = ""
     try:
         res = requests.get(target_url, headers=headers, timeout=10)
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
 
-        img_url = extract_image_from_detail_page(target_url, headers)
-        if img_url:
-            return clean_image_url(img_url)
+        # 1. 価格の抽出 (一覧・詳細ページ両対応)
+        price_elem = soup.select_one(".item_price, .price, .sales_price")
+        if price_elem:
+            price_text = price_elem.get_text(strip=True)
 
-        first_product_a = soup.select_one(".product_list a, .item_list a, .product_data a, table.product a, .info_detail a, a[href*='pid=']")
-        if first_product_a and first_product_a.get("href"):
-            deep_url = requests.compat.urljoin(target_url, first_product_a["href"])
-            img_url = extract_image_from_detail_page(deep_url, headers)
-            if img_url:
-                return clean_image_url(img_url)
+        # 2. 画像の抽出
+        extracted_img = extract_image_from_detail_page(target_url, headers)
+        if extracted_img:
+            img_url = clean_image_url(extracted_img)
+        else:
+            first_product_a = soup.select_one(".product_list a, .item_list a, .product_data a, table.product a, .info_detail a, a[href*='pid=']")
+            if first_product_a and first_product_a.get("href"):
+                deep_url = requests.compat.urljoin(target_url, first_product_a["href"])
+                deep_img = extract_image_from_detail_page(deep_url, headers)
+                if deep_img:
+                    img_url = clean_image_url(deep_img)
     except Exception as e:
-        log(f"[ERROR] 画像検索巡回エラー ({target_url}): {e}")
-    return DEFAULT_LOGO_URL
+        log(f"[ERROR] 詳細情報取得エラー ({target_url}): {e}")
+
+    return img_url, price_text
 
 def check_is_pre_announcement(url, headers):
-    """商品ページが準備中（フライング掲載）かどうかを判定"""
     try:
         res = requests.get(url, headers=headers, timeout=10)
         res.encoding = res.apparent_encoding
@@ -168,7 +170,7 @@ def check_is_pre_announcement(url, headers):
         return False
     except Exception as e:
         log(f"[ERROR] 準備中チェックエラー ({url}): {e}")
-        return True  # 判定エラー時は安全のためプレ状態として扱う
+        return True
 
 def send_flex_message(items):
     if not LINE_ACCESS_TOKEN:
@@ -196,9 +198,29 @@ def send_flex_message(items):
     for i in range(0, total_items, chunk_size):
         chunk = items[i:i + chunk_size]
         bubbles = []
-        for title, product_url, img_url, _ in chunk:
+        for title, product_url, img_url, item_key, price_text in chunk:
             display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
             display_img = img_url if img_url else DEFAULT_LOGO_URL
+
+            # Flex Messageの内容（価格がある場合は赤文字で追加）
+            body_contents = [
+                {
+                    "type": "text",
+                    "text": display_title,
+                    "size": "md",
+                    "wrap": True,
+                    "weight": "bold"
+                }
+            ]
+            if price_text:
+                body_contents.append({
+                    "type": "text",
+                    "text": price_text,
+                    "size": "sm",
+                    "color": "#ff0000",
+                    "weight": "bold",
+                    "margin": "md"
+                })
 
             bubble = {
                 "type": "bubble",
@@ -212,15 +234,7 @@ def send_flex_message(items):
                 "body": {
                     "type": "box",
                     "layout": "vertical",
-                    "contents": [
-                        {
-                            "type": "text",
-                            "text": display_title,
-                            "size": "md",
-                            "wrap": True,
-                            "weight": "bold"
-                        }
-                    ]
+                    "contents": body_contents
                 },
                 "footer": {
                     "type": "box",
@@ -374,7 +388,6 @@ def main():
     
     for curr_rank, (title, url, item_key) in enumerate(all_items):
         if item_key not in prev_snapshot:
-            # 新規商品を発見
             is_pre = check_is_pre_announcement(url, headers)
             status = 'pre' if is_pre else 'full'
             notify_type = 'pre_new' if is_pre else 'full_new'
@@ -387,23 +400,18 @@ def main():
             prev_rank, prev_status = prev_snapshot[item_key]
             
             if prev_status == 'pre':
-                # 前回「写真待ち」だった商品を再チェック
                 is_pre = check_is_pre_announcement(url, headers)
                 if is_pre:
-                    # まだ準備中（スルーして記憶のみ維持）
                     next_snapshot_data.append((title, url, item_key, 'pre'))
                 else:
-                    # 本掲載に昇格した！
                     notify_type = 'full_upgrade'
                     items_to_notify.append((title, url, item_key, curr_rank, notify_type))
                     next_snapshot_data.append((title, url, item_key, 'full'))
                     log(f"[DEBUG] 本掲載への昇格を検知: {title}")
             else:
-                # 既に完了している商品はそのまま記憶
                 next_snapshot_data.append((title, url, item_key, 'full'))
                 existing_full_items.append((curr_rank, prev_rank, title, url, item_key))
 
-    # --- 再浮上（上積み）チェック ---
     for idx, (curr_rank, prev_rank, title, url, item_key) in enumerate(existing_full_items):
         rest_prev_ranks = [item[1] for item in existing_full_items[idx+1:]]
         if rest_prev_ranks:
@@ -426,18 +434,19 @@ def main():
             for title, url, item_key, rank, notify_type in items_to_notify:
                 log(f"[INFO] 通知処理中: {title} (タイプ: {notify_type})")
                 
-                # 通知タイプに応じたタイトルの加工と画像の取得
+                # 事前告知の場合は価格確認を行わず準備中扱いにする
                 if notify_type == 'pre_new':
                     display_title = f"【事前告知(写真待)】 {title}"
-                    img_url = PRE_ANNOUNCEMENT_IMAGE_URL  # ★ここでGitHub上の画像を適用
+                    img_url = PRE_ANNOUNCEMENT_IMAGE_URL
+                    price_text = "価格: 準備中"
                 elif notify_type == 'full_upgrade':
                     display_title = f"【本掲載開始！】 {title}"
-                    img_url = fetch_product_image_url(url, headers)
+                    img_url, price_text = fetch_product_details(url, headers)
                 else:
                     display_title = title
-                    img_url = fetch_product_image_url(url, headers)
+                    img_url, price_text = fetch_product_details(url, headers)
                     
-                processed_items.append((display_title, url, img_url, item_key))
+                processed_items.append((display_title, url, img_url, item_key, price_text))
 
             if processed_items:
                 notify_success = send_flex_message(processed_items)
