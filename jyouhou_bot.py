@@ -3,12 +3,16 @@ import sqlite3
 import hashlib
 import requests
 import re
+import xml.etree.ElementTree as ET
 from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
 
 TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://fishing-shop-jh.com/img/logo.png"
 PRE_ANNOUNCEMENT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Jzyunbi.jpg"
+
+# ブログ用のRSSフィードURL
+BLOG_RSS_URL = "https://rssblog.ameba.jp/jyouhou-since1957/rss20.xml"
 
 DB_PATH = "products.db" 
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
@@ -31,6 +35,7 @@ def generate_item_key(title, url):
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    # 商品用のDB
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS snapshot_v3 (
             rank INTEGER PRIMARY KEY,
@@ -48,8 +53,9 @@ def init_db():
             for r in cursor.fetchall():
                 cursor.execute('INSERT INTO snapshot_v3 (rank, item_key, title, url, status) VALUES (?, ?, ?, ?, ?)', 
                                (r[0], r[1], r[2], r[3], 'full'))
-            log("[INFO] データベース構造をv3(2段階通知対応)に安全にアップグレードしました。")
+            log("[INFO] データベース構造をv3に安全にアップグレードしました。")
 
+    # システム状態管理
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS system_status (
             id INTEGER PRIMARY KEY,
@@ -57,6 +63,17 @@ def init_db():
         )
     ''')
     cursor.execute('INSERT OR IGNORE INTO system_status (id, is_limited) VALUES (1, 0)')
+    
+    # 【新規】ブログ専用のDBテーブル作成
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS blog_snapshot (
+            rank INTEGER PRIMARY KEY,
+            item_key TEXT,
+            title TEXT,
+            url TEXT
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -75,6 +92,7 @@ def set_system_status(is_limited):
     conn.commit()
     conn.close()
 
+# --- 商品データDB操作 ---
 def get_previous_snapshot():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -93,6 +111,26 @@ def save_snapshot(snapshot_data):
     conn.commit()
     conn.close()
 
+# --- ブログデータDB操作 ---
+def get_previous_blog_snapshot():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('SELECT item_key FROM blog_snapshot ORDER BY rank ASC')
+    keys = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return keys
+
+def save_blog_snapshot(blog_items):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM blog_snapshot')
+    for rank, (title, url, item_key) in enumerate(blog_items):
+        cursor.execute('INSERT INTO blog_snapshot (rank, item_key, title, url) VALUES (?, ?, ?, ?)', 
+                       (rank, item_key, title, url))
+    conn.commit()
+    conn.close()
+
+# --- 画像・情報取得系 ---
 def clean_image_url(raw_url):
     if not raw_url:
         return DEFAULT_LOGO_URL
@@ -131,7 +169,6 @@ def extract_image_from_detail_page(detail_url, headers):
     return None
 
 def fetch_product_details(target_url, headers):
-    """画像URLと価格情報を同時に取得する（サーバー負荷を抑えるため統合）"""
     img_url = DEFAULT_LOGO_URL
     price_text = ""
     try:
@@ -139,12 +176,10 @@ def fetch_product_details(target_url, headers):
         res.encoding = res.apparent_encoding
         soup = BeautifulSoup(res.text, "html.parser")
 
-        # 1. 価格の抽出 (一覧・詳細ページ両対応)
         price_elem = soup.select_one(".item_price, .price, .sales_price")
         if price_elem:
             price_text = price_elem.get_text(strip=True)
 
-        # 2. 画像の抽出
         extracted_img = extract_image_from_detail_page(target_url, headers)
         if extracted_img:
             img_url = clean_image_url(extracted_img)
@@ -172,6 +207,26 @@ def check_is_pre_announcement(url, headers):
         log(f"[ERROR] 準備中チェックエラー ({url}): {e}")
         return True
 
+def get_latest_blog_posts():
+    """RSSを使用してブログの最新記事情報を安全・軽量に取得する"""
+    try:
+        res = requests.get(BLOG_RSS_URL, timeout=10)
+        res.raise_for_status()
+        root = ET.fromstring(res.text)
+        items = []
+        for item in root.findall('.//item'):
+            title = item.find('title').text
+            url = item.find('link').text
+            key = generate_item_key(title, url)
+            items.append((title, url, key))
+            if len(items) >= MAX_TRACK_LIMIT:
+                break
+        return items
+    except Exception as e:
+        log(f"[ERROR] ブログRSS取得エラー: {e}")
+        return []
+
+# --- LINE通知系 ---
 def send_flex_message(items):
     if not LINE_ACCESS_TOKEN:
         log("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
@@ -202,7 +257,6 @@ def send_flex_message(items):
             display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
             display_img = img_url if img_url else DEFAULT_LOGO_URL
 
-            # Flex Messageの内容（価格がある場合は赤文字で追加）
             body_contents = [
                 {
                     "type": "text",
@@ -352,8 +406,37 @@ def main():
         return
 
     init_db()
-    log("城峰釣具店 (INFORMATION監視) を開始します...")
 
+    # ==========================================
+    # 1. ブログ監視（現在はテストモード：記憶のみでLINE通知なし）
+    # ==========================================
+    log("城峰釣具店ブログ (RSS監視) を開始します...")
+    blog_items = get_latest_blog_posts()
+    
+    if blog_items:
+        log(f"[DEBUG] ブログ最新データ件数: {len(blog_items)}件")
+        prev_blog_keys = get_previous_blog_snapshot()
+        
+        if not prev_blog_keys:
+            log(f"[INFO] ブログDB初期化: 現在の最新{len(blog_items)}件を記憶します。")
+            save_blog_snapshot(blog_items)
+            log("[INFO] ブログの初期化完了。次回から新着を検知します。")
+        else:
+            new_blogs = []
+            for b_title, b_url, b_key in blog_items:
+                if b_key not in prev_blog_keys:
+                    new_blogs.append((b_title, b_url, b_key))
+            
+            if new_blogs:
+                log(f"[INFO] 【テストモード】ブログの新着が {len(new_blogs)}件 ありますが、安全確認期間のためLINE通知せず記憶だけ行います。")
+                save_blog_snapshot(blog_items)
+            else:
+                log("[INFO] ブログの新しい記事はありませんでした。")
+
+    # ==========================================
+    # 2. 商品監視（通常稼働）
+    # ==========================================
+    log("城峰釣具店 商品情報 (INFORMATION監視) を開始します...")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
@@ -367,7 +450,7 @@ def main():
         return
 
     all_items = get_top_information_items(soup)
-    log(f"[DEBUG] 監視対象とする上位最新データ件数: {len(all_items)}件")
+    log(f"[DEBUG] 商品情報 監視対象データ件数: {len(all_items)}件")
 
     if not all_items:
         log("[INFO] INFORMATION枠内に商品が見つかりませんでした。")
@@ -382,9 +465,9 @@ def main():
         log("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
         return
 
-    items_to_notify = []        # 通知用リスト (title, url, item_key, rank, notify_type)
-    next_snapshot_data = []     # 次回用の記憶リスト (title, url, item_key, status)
-    existing_full_items = []    # 再浮上チェック用
+    items_to_notify = []
+    next_snapshot_data = []
+    existing_full_items = []
     
     for curr_rank, (title, url, item_key) in enumerate(all_items):
         if item_key not in prev_snapshot:
@@ -421,7 +504,7 @@ def main():
                 log(f"[DEBUG] 再浮上（上積み）検知: {title} (前回{prev_rank}位 -> 今回{curr_rank}位)")
 
     items_to_notify = sorted(items_to_notify, key=lambda x: x[3])
-    log(f"[DEBUG] 抽出された通知対象: {len(items_to_notify)}件")
+    log(f"[DEBUG] 抽出された商品通知対象: {len(items_to_notify)}件")
 
     notify_success = True
 
@@ -434,7 +517,6 @@ def main():
             for title, url, item_key, rank, notify_type in items_to_notify:
                 log(f"[INFO] 通知処理中: {title} (タイプ: {notify_type})")
                 
-                # 事前告知の場合は価格確認を行わず準備中扱いにする
                 if notify_type == 'pre_new':
                     display_title = f"【事前告知(写真待)】 {title}"
                     img_url = PRE_ANNOUNCEMENT_IMAGE_URL
