@@ -8,9 +8,11 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
 
 TARGET_URL = "https://fishing-shop-jh.com/"
-# ★修正: 実際のHPで使用されている正しいロゴ画像のURLに変更
 DEFAULT_LOGO_URL = "https://img07.shop-pro.jp/PA01332/799/PA01332799.png"
 PRE_ANNOUNCEMENT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Jzyunbi.jpg"
+
+# ★新規: ブログ通知用のデフォルト画像（GitHubのRaw URLに書き換えてください）
+BLOG_DEFAULT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Blog_img.jpg"
 
 # ブログ用のRSSフィードURL
 BLOG_RSS_URL = "https://rssblog.ameba.jp/jyouhou-since1957/rss20.xml"
@@ -433,7 +435,8 @@ def main():
                 blog_items_to_notify = []
                 for b_title, b_url, b_key in new_blogs:
                     display_title = f"【ブログ更新】 {b_title}"
-                    img_url = DEFAULT_LOGO_URL
+                    # ★修正: ブログ専用の画像URLを使用する
+                    img_url = BLOG_DEFAULT_IMAGE_URL
                     price_text = "ブログ最新記事"
                     blog_items_to_notify.append((display_title, b_url, img_url, b_key, price_text))
                 
