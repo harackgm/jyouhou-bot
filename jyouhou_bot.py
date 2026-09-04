@@ -208,7 +208,6 @@ def check_is_pre_announcement(url, headers):
         return True
 
 def get_latest_blog_posts():
-    """RSSを使用してブログの最新記事情報を安全・軽量に取得する"""
     try:
         res = requests.get(BLOG_RSS_URL, timeout=10)
         res.raise_for_status()
@@ -225,6 +224,32 @@ def get_latest_blog_posts():
     except Exception as e:
         log(f"[ERROR] ブログRSS取得エラー: {e}")
         return []
+
+def get_top_information_items(soup):
+    info_div = soup.find("div", class_="info")
+    if not info_div:
+        log("[WARN] div.info が見つかりませんでした。")
+        return []
+
+    items = []
+    seen_keys = set()
+
+    for a_tag in info_div.find_all("a", href=True):
+        href = a_tag["href"]
+        full_title = re.sub(r'\s+', ' ', a_tag.get_text(strip=True))
+
+        if not href or len(full_title) <= 2:
+            continue
+
+        full_url = requests.compat.urljoin(TARGET_URL, href)
+        item_key = generate_item_key(full_title, full_url)
+        
+        if item_key not in seen_keys:
+            items.append((full_title, full_url, item_key))
+            seen_keys.add(item_key)
+            if len(items) >= MAX_TRACK_LIMIT:
+                break
+    return items
 
 # --- LINE通知系 ---
 def send_flex_message(items):
@@ -410,7 +435,6 @@ def main():
                     price_text = "ブログ最新記事"
                     blog_items_to_notify.append((display_title, b_url, img_url, b_key, price_text))
                 
-                # ブログ用の通知送信処理
                 if len(blog_items_to_notify) > MAX_NOTIFY_LIMIT:
                     log(f"[WARN] ブログ検知が{len(blog_items_to_notify)}件と多いため、サマリー通知を送信します。")
                     blog_notify_success = send_summary_message(blog_items_to_notify)
