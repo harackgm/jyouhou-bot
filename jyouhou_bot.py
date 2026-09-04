@@ -10,11 +10,8 @@ from datetime import datetime, timezone, timedelta
 TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://img07.shop-pro.jp/PA01332/799/PA01332799.png"
 PRE_ANNOUNCEMENT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Jzyunbi.jpg"
-
-# ★新規: ブログ通知用のデフォルト画像（GitHubのRaw URLに書き換えてください）
 BLOG_DEFAULT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Blog_img.jpg"
 
-# ブログ用のRSSフィードURL
 BLOG_RSS_URL = "https://rssblog.ameba.jp/jyouhou-since1957/rss20.xml"
 
 DB_PATH = "products.db" 
@@ -39,7 +36,6 @@ def generate_item_key(title, url):
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # 商品用のDB
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS snapshot_v3 (
             rank INTEGER PRIMARY KEY,
@@ -59,7 +55,6 @@ def init_db():
                                (r[0], r[1], r[2], r[3], 'full'))
             log("[INFO] データベース構造をv3に安全にアップグレードしました。")
 
-    # システム状態管理
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS system_status (
             id INTEGER PRIMARY KEY,
@@ -68,7 +63,6 @@ def init_db():
     ''')
     cursor.execute('INSERT OR IGNORE INTO system_status (id, is_limited) VALUES (1, 0)')
     
-    # ブログ専用のDBテーブル作成
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS blog_snapshot (
             rank INTEGER PRIMARY KEY,
@@ -96,7 +90,6 @@ def set_system_status(is_limited):
     conn.commit()
     conn.close()
 
-# --- 商品データDB操作 ---
 def get_previous_snapshot():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -115,7 +108,6 @@ def save_snapshot(snapshot_data):
     conn.commit()
     conn.close()
 
-# --- ブログデータDB操作 ---
 def get_previous_blog_snapshot():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -134,7 +126,6 @@ def save_blog_snapshot(blog_items):
     conn.commit()
     conn.close()
 
-# --- 画像・情報取得系 ---
 def clean_image_url(raw_url):
     if not raw_url:
         return DEFAULT_LOGO_URL
@@ -255,7 +246,6 @@ def get_top_information_items(soup):
                 break
     return items
 
-# --- LINE通知系 ---
 def send_flex_message(items):
     if not LINE_ACCESS_TOKEN:
         log("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
@@ -410,8 +400,12 @@ def main():
 
     init_db()
 
+    combined_notify_list = []
+    new_blogs_found = False
+    blog_items_to_save = []
+
     # ==========================================
-    # 1. ブログ監視
+    # 1. ブログの確認
     # ==========================================
     log("城峰釣具店ブログ (RSS監視) を開始します...")
     blog_items = get_latest_blog_posts()
@@ -431,30 +425,20 @@ def main():
                     new_blogs.append((b_title, b_url, b_key))
             
             if new_blogs:
-                log(f"[INFO] ブログの新着を {len(new_blogs)}件 検知しました。LINE通知を実行します。")
-                blog_items_to_notify = []
+                new_blogs_found = True
+                blog_items_to_save = blog_items
+                log(f"[INFO] ブログの新着を {len(new_blogs)}件 検知しました。")
                 for b_title, b_url, b_key in new_blogs:
                     display_title = f"【ブログ更新】 {b_title}"
-                    # ★修正: ブログ専用の画像URLを使用する
                     img_url = BLOG_DEFAULT_IMAGE_URL
                     price_text = "ブログ最新記事"
-                    blog_items_to_notify.append((display_title, b_url, img_url, b_key, price_text))
-                
-                if len(blog_items_to_notify) > MAX_NOTIFY_LIMIT:
-                    log(f"[WARN] ブログ検知が{len(blog_items_to_notify)}件と多いため、サマリー通知を送信します。")
-                    blog_notify_success = send_summary_message(blog_items_to_notify)
-                else:
-                    blog_notify_success = send_flex_message(blog_items_to_notify)
-                
-                if blog_notify_success:
-                    save_blog_snapshot(blog_items)
-                else:
-                    log("[WARN] ブログのLINE通知に失敗したため、DB更新をスキップしました。")
+                    # 統合リストへ追加
+                    combined_notify_list.append((display_title, b_url, img_url, b_key, price_text))
             else:
                 log("[INFO] ブログの新しい記事はありませんでした。")
 
     # ==========================================
-    # 2. 商品監視
+    # 2. 商品の確認
     # ==========================================
     log("城峰釣具店 商品情報 (INFORMATION監視) を開始します...")
     headers = {
@@ -472,105 +456,111 @@ def main():
     all_items = get_top_information_items(soup)
     log(f"[DEBUG] 商品情報 監視対象データ件数: {len(all_items)}件")
 
+    unique_next_snapshot = []
+
     if not all_items:
         log("[INFO] INFORMATION枠内に商品が見つかりませんでした。")
-        return
-
-    prev_snapshot = get_previous_snapshot()
-
-    if not prev_snapshot:
-        log(f"[INFO] データベース初期化: 現在の最新{len(all_items)}件をすべて本掲載扱いとして記憶します。")
-        initial_data = [(title, url, item_key, 'full') for _, (title, url, item_key) in enumerate(all_items)]
-        save_snapshot(initial_data)
-        log("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
-        return
-
-    raw_items_to_notify = []
-    next_snapshot_data = []
-    existing_full_items = []
-    
-    for curr_rank, (title, url, item_key) in enumerate(all_items):
-        if item_key not in prev_snapshot:
-            is_pre = check_is_pre_announcement(url, headers)
-            status = 'pre' if is_pre else 'full'
-            notify_type = 'pre_new' if is_pre else 'full_new'
-            
-            raw_items_to_notify.append((title, url, item_key, curr_rank, notify_type))
-            next_snapshot_data.append((title, url, item_key, status))
-            log(f"[DEBUG] 新規追加検知: {title} (状態: {status})")
-            
-        else:
-            prev_rank, prev_status = prev_snapshot[item_key]
-            
-            if prev_status == 'pre':
-                is_pre = check_is_pre_announcement(url, headers)
-                if is_pre:
-                    next_snapshot_data.append((title, url, item_key, 'pre'))
-                else:
-                    notify_type = 'full_upgrade'
-                    raw_items_to_notify.append((title, url, item_key, curr_rank, notify_type))
-                    next_snapshot_data.append((title, url, item_key, 'full'))
-                    log(f"[DEBUG] 本掲載への昇格を検知: {title}")
-            else:
-                next_snapshot_data.append((title, url, item_key, 'full'))
-                existing_full_items.append((curr_rank, prev_rank, title, url, item_key))
-
-    for idx, (curr_rank, prev_rank, title, url, item_key) in enumerate(existing_full_items):
-        rest_prev_ranks = [item[1] for item in existing_full_items[idx+1:]]
-        if rest_prev_ranks:
-            min_prev_in_rest = min(rest_prev_ranks)
-            if prev_rank > min_prev_in_rest:
-                raw_items_to_notify.append((title, url, item_key, curr_rank, 'full_resurface'))
-                log(f"[DEBUG] 再浮上（上積み）検知: {title} (前回{prev_rank}位 -> 今回{curr_rank}位)")
-
-    unique_items_to_notify = []
-    seen_notify_keys = set()
-    for item in raw_items_to_notify:
-        if item[2] not in seen_notify_keys:
-            unique_items_to_notify.append(item)
-            seen_notify_keys.add(item[2])
-
-    items_to_notify = sorted(unique_items_to_notify, key=lambda x: x[3])
-    log(f"[DEBUG] 抽出された商品通知対象: {len(items_to_notify)}件")
-
-    notify_success = True
-
-    if items_to_notify:
-        if len(items_to_notify) > MAX_NOTIFY_LIMIT:
-            log(f"[WARN] 検知が{len(items_to_notify)}件と多いため、LINE通知枠保護により個別送信をスキップし、サマリー通知を送信します。")
-            notify_success = send_summary_message(items_to_notify)
-        else:
-            processed_items = []
-            for title, url, item_key, rank, notify_type in items_to_notify:
-                log(f"[INFO] 通知処理中: {title} (タイプ: {notify_type})")
-                
-                if notify_type == 'pre_new':
-                    display_title = f"【事前告知(写真待)】 {title}"
-                    img_url = PRE_ANNOUNCEMENT_IMAGE_URL
-                    price_text = "価格: 準備中"
-                elif notify_type == 'full_upgrade':
-                    display_title = f"【本掲載開始！】 {title}"
-                    img_url, price_text = fetch_product_details(url, headers)
-                else:
-                    display_title = title
-                    img_url, price_text = fetch_product_details(url, headers)
-                    
-                processed_items.append((display_title, url, img_url, item_key, price_text))
-
-            if processed_items:
-                notify_success = send_flex_message(processed_items)
     else:
-        log("[INFO] 新しい未通知商品、または本掲載への昇格はありませんでした。")
+        prev_snapshot = get_previous_snapshot()
+
+        if not prev_snapshot:
+            log(f"[INFO] データベース初期化: 現在の最新{len(all_items)}件をすべて本掲載扱いとして記憶します。")
+            initial_data = [(title, url, item_key, 'full') for _, (title, url, item_key) in enumerate(all_items)]
+            save_snapshot(initial_data)
+            log("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
+        else:
+            raw_items_to_notify = []
+            next_snapshot_data = []
+            existing_full_items = []
+            
+            for curr_rank, (title, url, item_key) in enumerate(all_items):
+                if item_key not in prev_snapshot:
+                    is_pre = check_is_pre_announcement(url, headers)
+                    status = 'pre' if is_pre else 'full'
+                    notify_type = 'pre_new' if is_pre else 'full_new'
+                    
+                    raw_items_to_notify.append((title, url, item_key, curr_rank, notify_type))
+                    next_snapshot_data.append((title, url, item_key, status))
+                    log(f"[DEBUG] 新規追加検知: {title} (状態: {status})")
+                    
+                else:
+                    prev_rank, prev_status = prev_snapshot[item_key]
+                    
+                    if prev_status == 'pre':
+                        is_pre = check_is_pre_announcement(url, headers)
+                        if is_pre:
+                            next_snapshot_data.append((title, url, item_key, 'pre'))
+                        else:
+                            notify_type = 'full_upgrade'
+                            raw_items_to_notify.append((title, url, item_key, curr_rank, notify_type))
+                            next_snapshot_data.append((title, url, item_key, 'full'))
+                            log(f"[DEBUG] 本掲載への昇格を検知: {title}")
+                    else:
+                        next_snapshot_data.append((title, url, item_key, 'full'))
+                        existing_full_items.append((curr_rank, prev_rank, title, url, item_key))
+
+            for idx, (curr_rank, prev_rank, title, url, item_key) in enumerate(existing_full_items):
+                rest_prev_ranks = [item[1] for item in existing_full_items[idx+1:]]
+                if rest_prev_ranks:
+                    min_prev_in_rest = min(rest_prev_ranks)
+                    if prev_rank > min_prev_in_rest:
+                        raw_items_to_notify.append((title, url, item_key, curr_rank, 'full_resurface'))
+                        log(f"[DEBUG] 再浮上（上積み）検知: {title} (前回{prev_rank}位 -> 今回{curr_rank}位)")
+
+            unique_items_to_notify = []
+            seen_notify_keys = set()
+            for item in raw_items_to_notify:
+                if item[2] not in seen_notify_keys:
+                    unique_items_to_notify.append(item)
+                    seen_notify_keys.add(item[2])
+
+            items_to_notify = sorted(unique_items_to_notify, key=lambda x: x[3])
+            log(f"[DEBUG] 抽出された商品通知対象: {len(items_to_notify)}件")
+
+            if items_to_notify:
+                for title, url, item_key, rank, notify_type in items_to_notify:
+                    log(f"[INFO] 通知処理中: {title} (タイプ: {notify_type})")
+                    if notify_type == 'pre_new':
+                        display_title = f"【事前告知(写真待)】 {title}"
+                        img_url = PRE_ANNOUNCEMENT_IMAGE_URL
+                        price_text = "価格: 準備中"
+                    elif notify_type == 'full_upgrade':
+                        display_title = f"【本掲載開始！】 {title}"
+                        img_url, price_text = fetch_product_details(url, headers)
+                    else:
+                        display_title = title
+                        img_url, price_text = fetch_product_details(url, headers)
+                        
+                    # 統合リストへ追加
+                    combined_notify_list.append((display_title, url, img_url, item_key, price_text))
+            else:
+                log("[INFO] 新しい未通知商品、または本掲載への昇格はありませんでした。")
+
+            # 保存用DBデータの重複排除（送信が成功した場合に保存される）
+            seen_snap_keys = set()
+            for item in next_snapshot_data:
+                if item[2] not in seen_snap_keys:
+                    unique_next_snapshot.append(item)
+                    seen_snap_keys.add(item[2])
+
+    # ==========================================
+    # 3. 通知の統合送信とDB保存
+    # ==========================================
+    notify_success = True
+    if combined_notify_list:
+        if len(combined_notify_list) > MAX_NOTIFY_LIMIT:
+            log(f"[WARN] 検知が{len(combined_notify_list)}件と多いため、LINE通知枠保護により個別送信をスキップし、サマリー通知を送信します。")
+            notify_success = send_summary_message(combined_notify_list)
+        else:
+            notify_success = send_flex_message(combined_notify_list)
+    else:
+        log("[INFO] 今回送信する新しい通知（ブログ・商品）はありませんでした。")
 
     if notify_success:
-        unique_next_snapshot = []
-        seen_snap_keys = set()
-        for item in next_snapshot_data:
-            if item[2] not in seen_snap_keys:
-                unique_next_snapshot.append(item)
-                seen_snap_keys.add(item[2])
-                
-        save_snapshot(unique_next_snapshot)
+        if new_blogs_found:
+            save_blog_snapshot(blog_items_to_save)
+        if unique_next_snapshot:
+            save_snapshot(unique_next_snapshot)
         log("--- 処理が正常に完了しました ---")
     else:
         log("[WARN] LINE通知に失敗したため、次回の再試行のためにデータベースの更新をスキップしました。")
