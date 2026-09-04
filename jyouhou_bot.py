@@ -64,7 +64,7 @@ def init_db():
     ''')
     cursor.execute('INSERT OR IGNORE INTO system_status (id, is_limited) VALUES (1, 0)')
     
-    # 【新規】ブログ専用のDBテーブル作成
+    # ブログ専用のDBテーブル作成
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS blog_snapshot (
             rank INTEGER PRIMARY KEY,
@@ -351,11 +351,11 @@ def send_summary_message(new_items):
     
     recovery_text = "【システム通知】\n月間のLINE通信制限がリセットされたため、保留されていた情報をお届けします。\n\n" if is_recovery == 1 else ""
     
-    text = (f"{recovery_text}⚠️ 【城峰釣具店】更新アラート ⚠️\n"
+    text = (f"{recovery_text}⚠️ 【更新アラート】 ⚠️\n"
             f"一気に {len(new_items)} 件の更新が検知されました。\n"
             f"※大量通知防止ガードが作動したため、個別画像通知をスキップしました。\n\n"
             f"【更新内容の一部】\n{sample_texts}{more_text}\n\n"
-            f"▼詳細はサイトをご確認ください\n{TARGET_URL}")
+            f"▼詳細は各サイトをご確認ください")
             
     payload = {
         "messages": [{"type": "text", "text": text}]
@@ -373,32 +373,6 @@ def send_summary_message(new_items):
         log(f"[ERROR] サマリー通知送信失敗: {response.status_code} {response.text}")
         return False
 
-def get_top_information_items(soup):
-    info_div = soup.find("div", class_="info")
-    if not info_div:
-        log("[WARN] div.info が見つかりませんでした。")
-        return []
-
-    items = []
-    seen_keys = set()
-
-    for a_tag in info_div.find_all("a", href=True):
-        href = a_tag["href"]
-        full_title = re.sub(r'\s+', ' ', a_tag.get_text(strip=True))
-
-        if not href or len(full_title) <= 2:
-            continue
-
-        full_url = requests.compat.urljoin(TARGET_URL, href)
-        item_key = generate_item_key(full_title, full_url)
-        
-        if item_key not in seen_keys:
-            items.append((full_title, full_url, item_key))
-            seen_keys.add(item_key)
-            if len(items) >= MAX_TRACK_LIMIT:
-                break
-    return items
-
 def main():
     current_hour = datetime.now(JST).hour
     if 0 <= current_hour < 8:
@@ -408,7 +382,7 @@ def main():
     init_db()
 
     # ==========================================
-    # 1. ブログ監視（現在はテストモード：記憶のみでLINE通知なし）
+    # 1. ブログ監視（本番稼働：LINE通知あり）
     # ==========================================
     log("城峰釣具店ブログ (RSS監視) を開始します...")
     blog_items = get_latest_blog_posts()
@@ -428,8 +402,25 @@ def main():
                     new_blogs.append((b_title, b_url, b_key))
             
             if new_blogs:
-                log(f"[INFO] 【テストモード】ブログの新着が {len(new_blogs)}件 ありますが、安全確認期間のためLINE通知せず記憶だけ行います。")
-                save_blog_snapshot(blog_items)
+                log(f"[INFO] ブログの新着を {len(new_blogs)}件 検知しました。LINE通知を実行します。")
+                blog_items_to_notify = []
+                for b_title, b_url, b_key in new_blogs:
+                    display_title = f"【ブログ更新】 {b_title}"
+                    img_url = DEFAULT_LOGO_URL
+                    price_text = "ブログ最新記事"
+                    blog_items_to_notify.append((display_title, b_url, img_url, b_key, price_text))
+                
+                # ブログ用の通知送信処理
+                if len(blog_items_to_notify) > MAX_NOTIFY_LIMIT:
+                    log(f"[WARN] ブログ検知が{len(blog_items_to_notify)}件と多いため、サマリー通知を送信します。")
+                    blog_notify_success = send_summary_message(blog_items_to_notify)
+                else:
+                    blog_notify_success = send_flex_message(blog_items_to_notify)
+                
+                if blog_notify_success:
+                    save_blog_snapshot(blog_items)
+                else:
+                    log("[WARN] ブログのLINE通知に失敗したため、DB更新をスキップしました。")
             else:
                 log("[INFO] ブログの新しい記事はありませんでした。")
 
