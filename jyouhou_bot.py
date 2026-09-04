@@ -29,7 +29,9 @@ def log(msg):
     print(f"[{now}] {msg}")
 
 def generate_item_key(title, url):
-    raw_str = f"{title.strip()}_{url.strip()}"
+    # 重複判定を厳密にするため、タイトルから全角半角スペースをすべて除去してキーを生成
+    clean_title = re.sub(r'\s+', '', title)
+    raw_str = f"{clean_title}_{url.strip()}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
 
 def init_db():
@@ -236,16 +238,18 @@ def get_top_information_items(soup):
 
     for a_tag in info_div.find_all("a", href=True):
         href = a_tag["href"]
-        full_title = re.sub(r'\s+', ' ', a_tag.get_text(strip=True))
+        # HTML上の表示用タイトル（スペースを1つに揃えたもの）
+        display_title = re.sub(r'\s+', ' ', a_tag.get_text(strip=True))
 
-        if not href or len(full_title) <= 2:
+        if not href or len(display_title) <= 2:
             continue
 
         full_url = requests.compat.urljoin(TARGET_URL, href)
-        item_key = generate_item_key(full_title, full_url)
+        # キー生成時にスペースを完全に除去して重複を判定
+        item_key = generate_item_key(display_title, full_url)
         
         if item_key not in seen_keys:
-            items.append((full_title, full_url, item_key))
+            items.append((display_title, full_url, item_key))
             seen_keys.add(item_key)
             if len(items) >= MAX_TRACK_LIMIT:
                 break
@@ -407,7 +411,7 @@ def main():
     init_db()
 
     # ==========================================
-    # 1. ブログ監視（本番稼働：LINE通知あり）
+    # 1. ブログ監視
     # ==========================================
     log("城峰釣具店ブログ (RSS監視) を開始します...")
     blog_items = get_latest_blog_posts()
@@ -449,7 +453,7 @@ def main():
                 log("[INFO] ブログの新しい記事はありませんでした。")
 
     # ==========================================
-    # 2. 商品監視（通常稼働）
+    # 2. 商品監視
     # ==========================================
     log("城峰釣具店 商品情報 (INFORMATION監視) を開始します...")
     headers = {
@@ -480,7 +484,7 @@ def main():
         log("[INFO] 初期化完了。次回から追加・更新分のみ通知します。")
         return
 
-    items_to_notify = []
+    raw_items_to_notify = []
     next_snapshot_data = []
     existing_full_items = []
     
@@ -490,7 +494,7 @@ def main():
             status = 'pre' if is_pre else 'full'
             notify_type = 'pre_new' if is_pre else 'full_new'
             
-            items_to_notify.append((title, url, item_key, curr_rank, notify_type))
+            raw_items_to_notify.append((title, url, item_key, curr_rank, notify_type))
             next_snapshot_data.append((title, url, item_key, status))
             log(f"[DEBUG] 新規追加検知: {title} (状態: {status})")
             
@@ -503,7 +507,7 @@ def main():
                     next_snapshot_data.append((title, url, item_key, 'pre'))
                 else:
                     notify_type = 'full_upgrade'
-                    items_to_notify.append((title, url, item_key, curr_rank, notify_type))
+                    raw_items_to_notify.append((title, url, item_key, curr_rank, notify_type))
                     next_snapshot_data.append((title, url, item_key, 'full'))
                     log(f"[DEBUG] 本掲載への昇格を検知: {title}")
             else:
@@ -515,10 +519,18 @@ def main():
         if rest_prev_ranks:
             min_prev_in_rest = min(rest_prev_ranks)
             if prev_rank > min_prev_in_rest:
-                items_to_notify.append((title, url, item_key, curr_rank, 'full_resurface'))
+                raw_items_to_notify.append((title, url, item_key, curr_rank, 'full_resurface'))
                 log(f"[DEBUG] 再浮上（上積み）検知: {title} (前回{prev_rank}位 -> 今回{curr_rank}位)")
 
-    items_to_notify = sorted(items_to_notify, key=lambda x: x[3])
+    # 重複排除（同じ item_key が抽出された場合、最初の1つだけを残す）
+    unique_items_to_notify = []
+    seen_notify_keys = set()
+    for item in raw_items_to_notify:
+        if item[2] not in seen_notify_keys:
+            unique_items_to_notify.append(item)
+            seen_notify_keys.add(item[2])
+
+    items_to_notify = sorted(unique_items_to_notify, key=lambda x: x[3])
     log(f"[DEBUG] 抽出された商品通知対象: {len(items_to_notify)}件")
 
     notify_success = True
@@ -551,7 +563,15 @@ def main():
         log("[INFO] 新しい未通知商品、または本掲載への昇格はありませんでした。")
 
     if notify_success:
-        save_snapshot(next_snapshot_data)
+        # 重複排除されたリストでデータベースを上書き
+        unique_next_snapshot = []
+        seen_snap_keys = set()
+        for item in next_snapshot_data:
+            if item[2] not in seen_snap_keys:
+                unique_next_snapshot.append(item)
+                seen_snap_keys.add(item[2])
+                
+        save_snapshot(unique_next_snapshot)
         log("--- 処理が正常に完了しました ---")
     else:
         log("[WARN] LINE通知に失敗したため、次回の再試行のためにデータベースの更新をスキップしました。")
