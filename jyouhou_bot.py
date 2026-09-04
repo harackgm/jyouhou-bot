@@ -8,7 +8,8 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timezone, timedelta
 
 TARGET_URL = "https://fishing-shop-jh.com/"
-DEFAULT_LOGO_URL = "https://fishing-shop-jh.com/img/logo.png"
+# ★修正: 実際のHPで使用されている正しいロゴ画像のURLに変更
+DEFAULT_LOGO_URL = "https://img07.shop-pro.jp/PA01332/799/PA01332799.png"
 PRE_ANNOUNCEMENT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Jzyunbi.jpg"
 
 # ブログ用のRSSフィードURL
@@ -29,7 +30,6 @@ def log(msg):
     print(f"[{now}] {msg}")
 
 def generate_item_key(title, url):
-    # 重複判定を厳密にするため、タイトルから全角半角スペースをすべて除去してキーを生成
     clean_title = re.sub(r'\s+', '', title)
     raw_str = f"{clean_title}_{url.strip()}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
@@ -238,14 +238,12 @@ def get_top_information_items(soup):
 
     for a_tag in info_div.find_all("a", href=True):
         href = a_tag["href"]
-        # HTML上の表示用タイトル（スペースを1つに揃えたもの）
         display_title = re.sub(r'\s+', ' ', a_tag.get_text(strip=True))
 
         if not href or len(display_title) <= 2:
             continue
 
         full_url = requests.compat.urljoin(TARGET_URL, href)
-        # キー生成時にスペースを完全に除去して重複を判定
         item_key = generate_item_key(display_title, full_url)
         
         if item_key not in seen_keys:
@@ -522,7 +520,6 @@ def main():
                 raw_items_to_notify.append((title, url, item_key, curr_rank, 'full_resurface'))
                 log(f"[DEBUG] 再浮上（上積み）検知: {title} (前回{prev_rank}位 -> 今回{curr_rank}位)")
 
-    # 重複排除（同じ item_key が抽出された場合、最初の1つだけを残す）
     unique_items_to_notify = []
     seen_notify_keys = set()
     for item in raw_items_to_notify:
@@ -563,7 +560,6 @@ def main():
         log("[INFO] 新しい未通知商品、または本掲載への昇格はありませんでした。")
 
     if notify_success:
-        # 重複排除されたリストでデータベースを上書き
         unique_next_snapshot = []
         seen_snap_keys = set()
         for item in next_snapshot_data:
