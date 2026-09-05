@@ -10,8 +10,6 @@ from datetime import datetime, timezone, timedelta
 TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://img07.shop-pro.jp/PA01332/799/PA01332799.png"
 PRE_ANNOUNCEMENT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Jzyunbi.jpg"
-
-# ★修正: アップロードし直していただいた「Blog_img.jpg」のURLを指定しています
 BLOG_DEFAULT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Blog_img.jpg"
 
 BLOG_RSS_URL = "https://rssblog.ameba.jp/jyouhou-since1957/rss20.xml"
@@ -38,7 +36,6 @@ def generate_item_key(title, url):
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # 商品用のDB
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS snapshot_v3 (
             rank INTEGER PRIMARY KEY,
@@ -58,7 +55,6 @@ def init_db():
                                (r[0], r[1], r[2], r[3], 'full'))
             log("[INFO] データベース構造をv3に安全にアップグレードしました。")
 
-    # システム状態管理
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS system_status (
             id INTEGER PRIMARY KEY,
@@ -67,7 +63,6 @@ def init_db():
     ''')
     cursor.execute('INSERT OR IGNORE INTO system_status (id, is_limited) VALUES (1, 0)')
     
-    # ブログ専用のDBテーブル作成
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS blog_snapshot (
             rank INTEGER PRIMARY KEY,
@@ -95,7 +90,6 @@ def set_system_status(is_limited):
     conn.commit()
     conn.close()
 
-# --- 商品データDB操作 ---
 def get_previous_snapshot():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -114,7 +108,6 @@ def save_snapshot(snapshot_data):
     conn.commit()
     conn.close()
 
-# --- ブログデータDB操作 ---
 def get_previous_blog_snapshot():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -133,7 +126,6 @@ def save_blog_snapshot(blog_items):
     conn.commit()
     conn.close()
 
-# --- 画像・情報取得系 ---
 def clean_image_url(raw_url):
     if not raw_url:
         return DEFAULT_LOGO_URL
@@ -254,7 +246,6 @@ def get_top_information_items(soup):
                 break
     return items
 
-# --- LINE通知系 ---
 def send_flex_message(items):
     if not LINE_ACCESS_TOKEN:
         log("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
@@ -311,7 +302,8 @@ def send_flex_message(items):
                     "url": display_img,
                     "size": "full",
                     "aspectRatio": "4:3",
-                    "aspectMode": "cover"
+                    # ★修正: 画像が見切れないよう、cover（切り取り）から fit（全体を収める）に変更しました
+                    "aspectMode": "fit"
                 },
                 "body": {
                     "type": "box",
