@@ -12,6 +12,8 @@ DEFAULT_LOGO_URL = "https://img07.shop-pro.jp/PA01332/799/PA01332799.png"
 PRE_ANNOUNCEMENT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Jzyunbi.jpg"
 BLOG_DEFAULT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Blog_img.jpg"
 
+HEADER_BANNER_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/zyouhouexp.jpg"
+
 BLOG_RSS_URL = "https://rssblog.ameba.jp/jyouhou-since1957/rss20.xml"
 
 DB_PATH = "products.db" 
@@ -269,6 +271,15 @@ def send_flex_message(items):
             "text": "【システム通知】\n月間のLINE通信制限がリセットされたため、保留されていた新着情報をお届けします。"
         })
 
+    # ★修正: 通知リスト内に「ブログ」が含まれていない（商品のみの）場合だけ看板画像を表示します
+    has_blog = any(price_text == "ブログ最新記事" for _, _, _, _, price_text in items)
+    if not has_blog:
+        messages_payload.append({
+            "type": "image",
+            "originalContentUrl": HEADER_BANNER_IMAGE_URL,
+            "previewImageUrl": HEADER_BANNER_IMAGE_URL
+        })
+
     for i in range(0, total_items, chunk_size):
         chunk = items[i:i + chunk_size]
         bubbles = []
@@ -302,7 +313,6 @@ def send_flex_message(items):
                     "url": display_img,
                     "size": "full",
                     "aspectRatio": "4:3",
-                    # ★修正: 画像が見切れないよう、cover（切り取り）から fit（全体を収める）に変更しました
                     "aspectMode": "fit"
                 },
                 "body": {
@@ -344,7 +354,7 @@ def send_flex_message(items):
     
     response = requests.post(url, headers=headers, json=payload)
     if response.status_code == 200:
-        log(f"[INFO] LINE画像付きFlex通知送信成功 (計{total_items}件 / カルーセル数:{len(messages_payload)})")
+        log(f"[INFO] LINE画像付きFlex通知送信成功 (計{total_items}件 / カルーセル数:{len(messages_payload)-1 if not has_blog else len(messages_payload)})")
         set_system_status(0)
         return True
     elif response.status_code == 429:
@@ -433,7 +443,6 @@ def main():
                     display_title = f"【ブログ更新】 {b_title}"
                     img_url = BLOG_DEFAULT_IMAGE_URL
                     price_text = "ブログ最新記事"
-                    # 統合リストへ追加
                     combined_notify_list.append((display_title, b_url, img_url, b_key, price_text))
             else:
                 log("[INFO] ブログの新しい記事はありませんでした。")
@@ -532,12 +541,10 @@ def main():
                         display_title = title
                         img_url, price_text = fetch_product_details(url, headers)
                         
-                    # 統合リストへ追加
                     combined_notify_list.append((display_title, url, img_url, item_key, price_text))
             else:
                 log("[INFO] 新しい未通知商品、または本掲載への昇格はありませんでした。")
 
-            # 保存用DBデータの重複排除（送信が成功した場合に保存される）
             seen_snap_keys = set()
             for item in next_snapshot_data:
                 if item[2] not in seen_snap_keys:
