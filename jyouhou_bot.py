@@ -255,7 +255,6 @@ def send_flex_message(items):
 
     is_recovery = get_system_status()
     
-    # ★追加: 通知リストを「ブログ」と「商品」にグループ分けします
     blog_items = [item for item in items if item[4] == "ブログ最新記事"]
     product_items = [item for item in items if item[4] != "ブログ最新記事"]
 
@@ -273,10 +272,9 @@ def send_flex_message(items):
             "text": "【システム通知】\n月間のLINE通信制限がリセットされたため、保留されていた新着情報をお届けします。"
         })
 
-    # LINEの仕様上、カルーセルの最大数は10です
     chunk_size = 10
 
-    # 1. 商品グループの処理（直前に看板画像を追加）
+    # 1. 商品グループの処理
     if product_items:
         messages_payload.append({
             "type": "image",
@@ -316,7 +314,8 @@ def send_flex_message(items):
                         "url": display_img,
                         "size": "full",
                         "aspectRatio": "4:3",
-                        "aspectMode": "fit"
+                        # ★修正: fit から cover に戻し、枠いっぱいに表示させます
+                        "aspectMode": "cover"
                     },
                     "body": {
                         "type": "box",
@@ -353,7 +352,7 @@ def send_flex_message(items):
             }
             messages_payload.append(flex_msg)
 
-    # 2. ブロググループの処理（看板画像は出さずにカルーセルだけ追加）
+    # 2. ブロググループの処理
     if blog_items:
         for i in range(0, len(blog_items), chunk_size):
             chunk = blog_items[i:i + chunk_size]
@@ -387,7 +386,8 @@ def send_flex_message(items):
                         "url": display_img,
                         "size": "full",
                         "aspectRatio": "4:3",
-                        "aspectMode": "fit"
+                        # ★修正: fit から cover に戻し、枠いっぱいに表示させます
+                        "aspectMode": "cover"
                     },
                     "body": {
                         "type": "box",
@@ -424,7 +424,6 @@ def send_flex_message(items):
             }
             messages_payload.append(flex_msg)
 
-    # 万が一、グループ分割によりLINE送信上限(5枠)を超えた場合の安全装置
     if len(messages_payload) > 5:
         log("[WARN] メッセージ枠が5を超えるため、LINEの仕様に基づき分割送信します。")
         payloads = [{"messages": messages_payload[i:i + 5]} for i in range(0, len(messages_payload), 5)]
