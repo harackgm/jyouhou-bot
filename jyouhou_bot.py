@@ -254,8 +254,10 @@ def send_flex_message(items):
         return False
 
     is_recovery = get_system_status()
-    total_items = len(items)
-    chunk_size = 12 if total_items > 15 else 5
+    
+    # ★追加: 通知リストを「ブログ」と「商品」にグループ分けします
+    blog_items = [item for item in items if item[4] == "ブログ最新記事"]
+    product_items = [item for item in items if item[4] != "ブログ最新記事"]
 
     url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
@@ -271,99 +273,191 @@ def send_flex_message(items):
             "text": "【システム通知】\n月間のLINE通信制限がリセットされたため、保留されていた新着情報をお届けします。"
         })
 
-    # ★修正: 通知リスト内に「ブログ」が含まれていない（商品のみの）場合だけ看板画像を表示します
-    has_blog = any(price_text == "ブログ最新記事" for _, _, _, _, price_text in items)
-    if not has_blog:
+    # LINEの仕様上、カルーセルの最大数は10です
+    chunk_size = 10
+
+    # 1. 商品グループの処理（直前に看板画像を追加）
+    if product_items:
         messages_payload.append({
             "type": "image",
             "originalContentUrl": HEADER_BANNER_IMAGE_URL,
             "previewImageUrl": HEADER_BANNER_IMAGE_URL
         })
+        for i in range(0, len(product_items), chunk_size):
+            chunk = product_items[i:i + chunk_size]
+            bubbles = []
+            for title, product_url, img_url, item_key, price_text in chunk:
+                display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
+                display_img = img_url if img_url else DEFAULT_LOGO_URL
 
-    for i in range(0, total_items, chunk_size):
-        chunk = items[i:i + chunk_size]
-        bubbles = []
-        for title, product_url, img_url, item_key, price_text in chunk:
-            display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
-            display_img = img_url if img_url else DEFAULT_LOGO_URL
+                body_contents = [
+                    {
+                        "type": "text",
+                        "text": display_title,
+                        "size": "md",
+                        "wrap": True,
+                        "weight": "bold"
+                    }
+                ]
+                if price_text:
+                    body_contents.append({
+                        "type": "text",
+                        "text": price_text,
+                        "size": "sm",
+                        "color": "#ff0000",
+                        "weight": "bold",
+                        "margin": "md"
+                    })
 
-            body_contents = [
-                {
-                    "type": "text",
-                    "text": display_title,
-                    "size": "md",
-                    "wrap": True,
-                    "weight": "bold"
-                }
-            ]
-            if price_text:
-                body_contents.append({
-                    "type": "text",
-                    "text": price_text,
-                    "size": "sm",
-                    "color": "#ff0000",
-                    "weight": "bold",
-                    "margin": "md"
-                })
-
-            bubble = {
-                "type": "bubble",
-                "hero": {
-                    "type": "image",
-                    "url": display_img,
-                    "size": "full",
-                    "aspectRatio": "4:3",
-                    "aspectMode": "fit"
-                },
-                "body": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "contents": body_contents
-                },
-                "footer": {
-                    "type": "box",
-                    "layout": "vertical",
-                    "spacing": "sm",
-                    "contents": [
-                        {
-                            "type": "button",
-                            "style": "primary",
-                            "color": "#1DB954",
-                            "action": {
-                                "type": "uri",
-                                "label": "ページを開く",
-                                "uri": product_url
+                bubble = {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": display_img,
+                        "size": "full",
+                        "aspectRatio": "4:3",
+                        "aspectMode": "fit"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": body_contents
+                    },
+                    "footer": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "spacing": "sm",
+                        "contents": [
+                            {
+                                "type": "button",
+                                "style": "primary",
+                                "color": "#1DB954",
+                                "action": {
+                                    "type": "uri",
+                                    "label": "ページを開く",
+                                    "uri": product_url
+                                }
                             }
-                        }
-                    ]
+                        ]
+                    }
+                }
+                bubbles.append(bubble)
+
+            flex_msg = {
+                "type": "flex",
+                "altText": f"城峰釣具店 新着通知 ({len(chunk)}件)",
+                "contents": {
+                    "type": "carousel",
+                    "contents": bubbles
                 }
             }
-            bubbles.append(bubble)
+            messages_payload.append(flex_msg)
 
-        flex_msg = {
-            "type": "flex",
-            "altText": f"城峰釣具店 新着通知 ({len(chunk)}件)",
-            "contents": {
-                "type": "carousel",
-                "contents": bubbles
+    # 2. ブロググループの処理（看板画像は出さずにカルーセルだけ追加）
+    if blog_items:
+        for i in range(0, len(blog_items), chunk_size):
+            chunk = blog_items[i:i + chunk_size]
+            bubbles = []
+            for title, product_url, img_url, item_key, price_text in chunk:
+                display_title = title.strip() if (title and title.strip()) else "ブログ更新情報"
+                display_img = img_url if img_url else DEFAULT_LOGO_URL
+
+                body_contents = [
+                    {
+                        "type": "text",
+                        "text": display_title,
+                        "size": "md",
+                        "wrap": True,
+                        "weight": "bold"
+                    },
+                    {
+                        "type": "text",
+                        "text": price_text,
+                        "size": "sm",
+                        "color": "#ff0000",
+                        "weight": "bold",
+                        "margin": "md"
+                    }
+                ]
+
+                bubble = {
+                    "type": "bubble",
+                    "hero": {
+                        "type": "image",
+                        "url": display_img,
+                        "size": "full",
+                        "aspectRatio": "4:3",
+                        "aspectMode": "fit"
+                    },
+                    "body": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "contents": body_contents
+                    },
+                    "footer": {
+                        "type": "box",
+                        "layout": "vertical",
+                        "spacing": "sm",
+                        "contents": [
+                            {
+                                "type": "button",
+                                "style": "primary",
+                                "color": "#1DB954",
+                                "action": {
+                                    "type": "uri",
+                                    "label": "ページを開く",
+                                    "uri": product_url
+                                }
+                            }
+                        ]
+                    }
+                }
+                bubbles.append(bubble)
+
+            flex_msg = {
+                "type": "flex",
+                "altText": f"城峰釣具店 ブログ更新 ({len(chunk)}件)",
+                "contents": {
+                    "type": "carousel",
+                    "contents": bubbles
+                }
             }
-        }
-        messages_payload.append(flex_msg)
+            messages_payload.append(flex_msg)
 
-    payload = {"messages": messages_payload}
-    
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code == 200:
-        log(f"[INFO] LINE画像付きFlex通知送信成功 (計{total_items}件 / カルーセル数:{len(messages_payload)-1 if not has_blog else len(messages_payload)})")
-        set_system_status(0)
-        return True
-    elif response.status_code == 429:
-        log("[ERROR] 今月分のLINE通知上限（200通）に到達しました。翌月まで通知は送信されません。")
-        set_system_status(1)
+    # 万が一、グループ分割によりLINE送信上限(5枠)を超えた場合の安全装置
+    if len(messages_payload) > 5:
+        log("[WARN] メッセージ枠が5を超えるため、LINEの仕様に基づき分割送信します。")
+        payloads = [{"messages": messages_payload[i:i + 5]} for i in range(0, len(messages_payload), 5)]
+        success = True
+        for p in payloads:
+            response = requests.post(url, headers=headers, json=p)
+            if response.status_code == 429:
+                log("[ERROR] 今月分のLINE通知上限（200通）に到達しました。")
+                set_system_status(1)
+                return False
+            elif response.status_code != 200:
+                log(f"[ERROR] LINE通知送信失敗: {response.status_code} {response.text}")
+                success = False
+        
+        if success:
+            log(f"[INFO] 結合LINE通知 送信成功 (合計メッセージ枠数:{len(messages_payload)})")
+            set_system_status(0)
+            return True
         return False
     else:
-        log(f"[ERROR] LINE通知送信失敗: {response.status_code} {response.text}")
-        return False
+        payload = {"messages": messages_payload}
+        response = requests.post(url, headers=headers, json=payload)
+        if response.status_code == 200:
+            log(f"[INFO] 結合LINE通知 送信成功 (メッセージ枠数:{len(messages_payload)})")
+            set_system_status(0)
+            return True
+        elif response.status_code == 429:
+            log("[ERROR] 今月分のLINE通知上限（200通）に到達しました。翌月まで通知は送信されません。")
+            set_system_status(1)
+            return False
+        else:
+            log(f"[ERROR] LINE通知送信失敗: {response.status_code} {response.text}")
+            return False
 
 def send_summary_message(new_items):
     if not LINE_ACCESS_TOKEN:
