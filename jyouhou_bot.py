@@ -309,12 +309,12 @@ def send_flex_message(items):
 
                 bubble = {
                     "type": "bubble",
+                    "size": "giga", 
                     "hero": {
                         "type": "image",
                         "url": display_img,
                         "size": "full",
                         "aspectRatio": "4:3",
-                        # ★修正: fit から cover に戻し、枠いっぱいに表示させます
                         "aspectMode": "cover"
                     },
                     "body": {
@@ -381,12 +381,12 @@ def send_flex_message(items):
 
                 bubble = {
                     "type": "bubble",
+                    "size": "giga", 
                     "hero": {
                         "type": "image",
                         "url": display_img,
                         "size": "full",
-                        "aspectRatio": "4:3",
-                        # ★修正: fit から cover に戻し、枠いっぱいに表示させます
+                        "aspectRatio": "2400:1792", 
                         "aspectMode": "cover"
                     },
                     "body": {
