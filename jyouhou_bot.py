@@ -263,10 +263,6 @@ def send_flex_message(items):
         return False
 
     is_recovery = get_system_status()
-    
-    blog_items = [item for item in items if item[4] == "ブログ最新記事"]
-    product_items = [item for item in items if item[4] != "ブログ最新記事"]
-
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
@@ -282,55 +278,55 @@ def send_flex_message(items):
             "text": "【システム通知】\n月間のLINE通信制限がリセットされたため、保留されていた新着情報をお届けします。"
         })
 
+    # カルーセル1通あたりの最大表示数を10に設定
     chunk_size = 10
 
-    # 1. 商品グループの処理
-    if product_items:
-        # ★商品の直前に「独立した看板画像」を配置します
-        messages_payload.append({
-            "type": "image",
-            "originalContentUrl": HEADER_BANNER_IMAGE_URL,
-            "previewImageUrl": HEADER_BANNER_IMAGE_URL
-        })
-        for i in range(0, len(product_items), chunk_size):
-            chunk = product_items[i:i + chunk_size]
-            bubbles = []
-            for title, product_url, img_url, item_key, price_text in chunk:
-                display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
-                display_img = img_url if img_url else DEFAULT_LOGO_URL
+    # ブログと商品を1つのカルーセルに統合します
+    for i in range(0, len(items), chunk_size):
+        chunk = items[i:i + chunk_size]
+        bubbles = []
+        for title, product_url, img_url, item_key, price_text in chunk:
+            is_blog = (price_text == "ブログ最新記事")
+            display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
+            display_img = img_url if img_url else DEFAULT_LOGO_URL
 
-                body_contents = [
-                    {
-                        "type": "text",
-                        "text": display_title,
-                        "size": "md",
-                        "wrap": True,
-                        "weight": "bold"
-                    }
-                ]
-                if price_text:
-                    body_contents.append({
-                        "type": "text",
-                        "text": price_text,
-                        "size": "sm",
-                        "color": "#ff0000",
-                        "weight": "bold",
-                        "margin": "md"
-                    })
+            # テキスト部分の共通コンテンツ
+            body_texts = [
+                {
+                    "type": "text",
+                    "text": display_title,
+                    "size": "md",
+                    "wrap": True,
+                    "weight": "bold"
+                }
+            ]
+            if price_text:
+                body_texts.append({
+                    "type": "text",
+                    "text": price_text,
+                    "size": "sm",
+                    "color": "#ff0000",
+                    "weight": "bold",
+                    "margin": "md"
+                })
 
+            if is_blog:
+                # -------------------------
+                # ブログ用カードの設計
+                # -------------------------
                 bubble = {
                     "type": "bubble",
                     "hero": {
                         "type": "image",
                         "url": display_img,
                         "size": "full",
-                        "aspectRatio": "4:3",
-                        "aspectMode": "cover"
+                        "aspectRatio": "2400:1800",
+                        "aspectMode": "fit"
                     },
                     "body": {
                         "type": "box",
                         "layout": "vertical",
-                        "contents": body_contents
+                        "contents": body_texts
                     },
                     "footer": {
                         "type": "box",
@@ -350,58 +346,39 @@ def send_flex_message(items):
                         ]
                     }
                 }
-                bubbles.append(bubble)
-
-            flex_msg = {
-                "type": "flex",
-                "altText": f"城峰釣具店 新着通知 ({len(chunk)}件)",
-                "contents": {
-                    "type": "carousel",
-                    "contents": bubbles
-                }
-            }
-            messages_payload.append(flex_msg)
-
-    # 2. ブロググループの処理
-    if blog_items:
-        for i in range(0, len(blog_items), chunk_size):
-            chunk = blog_items[i:i + chunk_size]
-            bubbles = []
-            for title, product_url, img_url, item_key, price_text in chunk:
-                display_title = title.strip() if (title and title.strip()) else "ブログ更新情報"
-                display_img = img_url if img_url else DEFAULT_LOGO_URL
-
-                body_contents = [
-                    {
-                        "type": "text",
-                        "text": display_title,
-                        "size": "md",
-                        "wrap": True,
-                        "weight": "bold"
-                    },
-                    {
-                        "type": "text",
-                        "text": price_text,
-                        "size": "sm",
-                        "color": "#ff0000",
-                        "weight": "bold",
-                        "margin": "md"
-                    }
-                ]
-
+            else:
+                # -------------------------
+                # 商品用カードの設計
+                # -------------------------
                 bubble = {
                     "type": "bubble",
                     "hero": {
                         "type": "image",
-                        "url": display_img,
+                        "url": HEADER_BANNER_IMAGE_URL,
                         "size": "full",
-                        "aspectRatio": "2400:1800", 
-                        "aspectMode": "cover"
+                        "aspectRatio": "2400:1792",
+                        # ★修正: fitに変更し、看板画像がズーム（アップ）されるのを防ぎます
+                        "aspectMode": "fit"
                     },
                     "body": {
                         "type": "box",
                         "layout": "vertical",
-                        "contents": body_contents
+                        "paddingAll": "0px",
+                        "contents": [
+                            {
+                                "type": "image",
+                                "url": display_img,
+                                "size": "full",
+                                "aspectRatio": "4:3",
+                                "aspectMode": "cover"
+                            },
+                            {
+                                "type": "box",
+                                "layout": "vertical",
+                                "paddingAll": "md",
+                                "contents": body_texts
+                            }
+                        ]
                     },
                     "footer": {
                         "type": "box",
@@ -421,17 +398,18 @@ def send_flex_message(items):
                         ]
                     }
                 }
-                bubbles.append(bubble)
 
-            flex_msg = {
-                "type": "flex",
-                "altText": f"城峰釣具店 ブログ更新 ({len(chunk)}件)",
-                "contents": {
-                    "type": "carousel",
-                    "contents": bubbles
-                }
+            bubbles.append(bubble)
+
+        flex_msg = {
+            "type": "flex",
+            "altText": f"城峰釣具店 新着通知 ({len(chunk)}件)",
+            "contents": {
+                "type": "carousel",
+                "contents": bubbles
             }
-            messages_payload.append(flex_msg)
+        }
+        messages_payload.append(flex_msg)
 
     if len(messages_payload) > 5:
         log("[WARN] メッセージ枠が5を超えるため、LINEの仕様に基づき分割送信します。")
