@@ -11,13 +11,17 @@ TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://img07.shop-pro.jp/PA01332/799/PA01332799.png"
 PRE_ANNOUNCEMENT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Jzyunbi.jpg"
 BLOG_DEFAULT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Blog_img.jpg"
-
 HEADER_BANNER_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/zyouhouexp.jpg"
 
 BLOG_RSS_URL = "https://rssblog.ameba.jp/jyouhou-since1957/rss20.xml"
 
 DB_PATH = "products.db" 
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
+
+# --- 【安全装置】テスト通知モード設定 ---
+# 本番と同じ動作をしつつ、指定した管理者のIDにのみ通知を送ります。確認後は False に戻してください。
+TEST_MODE = True
+TEST_ADMIN_USER_ID = "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" # ★ここをご自身のLINEユーザーIDに書き換えてください
 
 # --- 安全装置の設定 ---
 MAX_NOTIFY_LIMIT = 24  
@@ -258,11 +262,13 @@ def send_flex_message(items):
     blog_items = [item for item in items if item[4] == "ブログ最新記事"]
     product_items = [item for item in items if item[4] != "ブログ最新記事"]
 
-    url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
     }
+    
+    # テストモードの判定（Trueなら管理者へpush、Falseなら全員へbroadcast）
+    api_endpoint = "https://api.line.me/v2/bot/message/push" if TEST_MODE else "https://api.line.me/v2/bot/message/broadcast"
 
     messages_payload = []
 
@@ -309,7 +315,6 @@ def send_flex_message(items):
 
                 bubble = {
                     "type": "bubble",
-                    "size": "giga", 
                     "hero": {
                         "type": "image",
                         "url": display_img,
@@ -381,12 +386,12 @@ def send_flex_message(items):
 
                 bubble = {
                     "type": "bubble",
-                    "size": "giga", 
                     "hero": {
                         "type": "image",
                         "url": display_img,
                         "size": "full",
-                        "aspectRatio": "2400:1792", 
+                        # ブログ用の新画像（完璧な4:3）に最適化
+                        "aspectRatio": "2400:1800", 
                         "aspectMode": "cover"
                     },
                     "body": {
@@ -426,10 +431,16 @@ def send_flex_message(items):
 
     if len(messages_payload) > 5:
         log("[WARN] メッセージ枠が5を超えるため、LINEの仕様に基づき分割送信します。")
-        payloads = [{"messages": messages_payload[i:i + 5]} for i in range(0, len(messages_payload), 5)]
+        payloads = []
+        for i in range(0, len(messages_payload), 5):
+            p = {"messages": messages_payload[i:i + 5]}
+            if TEST_MODE:
+                p["to"] = TEST_ADMIN_USER_ID
+            payloads.append(p)
+            
         success = True
         for p in payloads:
-            response = requests.post(url, headers=headers, json=p)
+            response = requests.post(api_endpoint, headers=headers, json=p)
             if response.status_code == 429:
                 log("[ERROR] 今月分のLINE通知上限（200通）に到達しました。")
                 set_system_status(1)
@@ -439,15 +450,20 @@ def send_flex_message(items):
                 success = False
         
         if success:
-            log(f"[INFO] 結合LINE通知 送信成功 (合計メッセージ枠数:{len(messages_payload)})")
+            mode_text = "【テスト送信】" if TEST_MODE else ""
+            log(f"[INFO] {mode_text}結合LINE通知 送信成功 (合計メッセージ枠数:{len(messages_payload)})")
             set_system_status(0)
             return True
         return False
     else:
         payload = {"messages": messages_payload}
-        response = requests.post(url, headers=headers, json=payload)
+        if TEST_MODE:
+            payload["to"] = TEST_ADMIN_USER_ID
+            
+        response = requests.post(api_endpoint, headers=headers, json=payload)
         if response.status_code == 200:
-            log(f"[INFO] 結合LINE通知 送信成功 (メッセージ枠数:{len(messages_payload)})")
+            mode_text = "【テスト送信】" if TEST_MODE else ""
+            log(f"[INFO] {mode_text}結合LINE通知 送信成功 (メッセージ枠数:{len(messages_payload)})")
             set_system_status(0)
             return True
         elif response.status_code == 429:
@@ -463,11 +479,11 @@ def send_summary_message(new_items):
         return False
     
     is_recovery = get_system_status()
-    url = "https://api.line.me/v2/bot/message/broadcast"
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
     }
+    api_endpoint = "https://api.line.me/v2/bot/message/push" if TEST_MODE else "https://api.line.me/v2/bot/message/broadcast"
     
     sample_texts = "\n".join([f"・{title}" for title, _, _, _, _ in new_items[:5]])
     more_text = f"\n...他 {len(new_items) - 5}件" if len(new_items) > 5 else ""
@@ -483,9 +499,13 @@ def send_summary_message(new_items):
     payload = {
         "messages": [{"type": "text", "text": text}]
     }
-    response = requests.post(url, headers=headers, json=payload)
+    if TEST_MODE:
+        payload["to"] = TEST_ADMIN_USER_ID
+
+    response = requests.post(api_endpoint, headers=headers, json=payload)
     if response.status_code == 200:
-        log("[INFO] サマリー通知を送信しました。")
+        mode_text = "【テスト送信】" if TEST_MODE else ""
+        log(f"[INFO] {mode_text}サマリー通知を送信しました。")
         set_system_status(0)
         return True
     elif response.status_code == 429:
