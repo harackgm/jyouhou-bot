@@ -11,7 +11,8 @@ TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://img07.shop-pro.jp/PA01332/799/PA01332799.png"
 PRE_ANNOUNCEMENT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Jzyunbi.jpg"
 BLOG_DEFAULT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Blog_img.png"
-HEADER_BANNER_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/zyouhouexp.jpg"
+# ★変更: 新しい画像「zyouhoum.png」に差し替えました
+HEADER_BANNER_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/zyouhoum.png"
 
 BLOG_RSS_URL = "https://rssblog.ameba.jp/jyouhou-since1957/rss20.xml"
 
@@ -277,6 +278,7 @@ def send_flex_message(items):
             "text": "【システム通知】\n月間のLINE通信制限がリセットされたため、保留されていた新着情報をお届けします。"
         })
 
+    # カルーセル1通あたりの最大表示数を5に設定
     chunk_size = 5
 
     # ブログと商品を分離して抽出
@@ -285,8 +287,6 @@ def send_flex_message(items):
 
     # 1. 商品グループの処理
     if product_items:
-        # ★注意: ここにあった独立した汽車の画像送信コードを完全に削除しました
-        
         for i in range(0, len(product_items), chunk_size):
             chunk = product_items[i:i + chunk_size]
             bubbles = []
@@ -319,7 +319,6 @@ def send_flex_message(items):
                         "type": "image",
                         "url": HEADER_BANNER_IMAGE_URL,
                         "size": "full",
-                        # ★修正: 汽車のバナーに合わせて横長の比率に設定し、ドアップを防ぎます
                         "aspectRatio": "3:1",
                         "aspectMode": "fit"
                     },
@@ -389,16 +388,17 @@ def send_flex_message(items):
                         "size": "md",
                         "wrap": True,
                         "weight": "bold"
-                    },
-                    {
+                    }
+                ]
+                if price_text:
+                    body_texts.append({
                         "type": "text",
                         "text": price_text,
                         "size": "sm",
                         "color": "#ff0000",
                         "weight": "bold",
                         "margin": "md"
-                    }
-                ]
+                    })
 
                 bubble = {
                     "type": "bubble",
