@@ -10,7 +10,8 @@ from datetime import datetime, timezone, timedelta
 TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://img07.shop-pro.jp/PA01332/799/PA01332799.png"
 PRE_ANNOUNCEMENT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Jzyunbi.jpg"
-BLOG_DEFAULT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Blog_img.jpg"
+# ★修正: 拡張子を .png に変更しました
+BLOG_DEFAULT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Blog_img.png"
 HEADER_BANNER_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/zyouhouexp.jpg"
 
 BLOG_RSS_URL = "https://rssblog.ameba.jp/jyouhou-since1957/rss20.xml"
@@ -23,7 +24,7 @@ TEST_ADMIN_USER_ID = os.getenv("LINE_ADMIN_USER_ID")
 
 # ★テストモード（Trueで管理者のみに送信）
 TEST_MODE = True
-# ★強制デザイン確認モード（Trueでブログ1件と商品1件を強制通知）
+# ★強制デザイン確認モード（Trueにすると最新ブログ1件と商品1件を強制通知します）
 FORCE_DESIGN_TEST = True
 
 # --- 安全装置の設定 ---
@@ -266,9 +267,6 @@ def send_flex_message(items):
 
     is_recovery = get_system_status()
     
-    blog_items = [item for item in items if item[4] == "ブログ最新記事"]
-    product_items = [item for item in items if item[4] != "ブログ最新記事"]
-
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
@@ -284,155 +282,107 @@ def send_flex_message(items):
             "text": "【システム通知】\n月間のLINE通信制限がリセットされたため、保留されていた新着情報をお届けします。"
         })
 
+    # カルーセル1通あたりの最大表示数を10に設定（通知枠の節約）
     chunk_size = 10
 
-    # 1. 商品グループの処理
-    if product_items:
-        messages_payload.append({
-            "type": "image",
-            "originalContentUrl": HEADER_BANNER_IMAGE_URL,
-            "previewImageUrl": HEADER_BANNER_IMAGE_URL
-        })
-        for i in range(0, len(product_items), chunk_size):
-            chunk = product_items[i:i + chunk_size]
-            bubbles = []
-            for title, product_url, img_url, item_key, price_text in chunk:
-                display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
-                display_img = img_url if img_url else DEFAULT_LOGO_URL
+    # ★ ブログと商品を一つのカルーセルに統合して処理します
+    for i in range(0, len(items), chunk_size):
+        chunk = items[i:i + chunk_size]
+        bubbles = []
+        for title, product_url, img_url, item_key, price_text in chunk:
+            is_blog = (price_text == "ブログ最新記事")
+            display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
+            display_img = img_url if img_url else DEFAULT_LOGO_URL
 
-                body_contents = [
-                    {
-                        "type": "text",
-                        "text": display_title,
-                        "size": "md",
-                        "wrap": True,
-                        "weight": "bold"
-                    }
-                ]
-                if price_text:
-                    body_contents.append({
-                        "type": "text",
-                        "text": price_text,
-                        "size": "sm",
-                        "color": "#ff0000",
-                        "weight": "bold",
-                        "margin": "md"
-                    })
-
-                bubble = {
-                    "type": "bubble",
-                    "hero": {
-                        "type": "image",
-                        "url": display_img,
-                        "size": "full",
-                        "aspectRatio": "4:3",
-                        "aspectMode": "cover"
-                    },
-                    "body": {
-                        "type": "box",
-                        "layout": "vertical",
-                        "contents": body_contents
-                    },
-                    "footer": {
-                        "type": "box",
-                        "layout": "vertical",
-                        "spacing": "sm",
-                        "contents": [
-                            {
-                                "type": "button",
-                                "style": "primary",
-                                "color": "#1DB954",
-                                "action": {
-                                    "type": "uri",
-                                    "label": "ページを開く",
-                                    "uri": product_url
-                                }
-                            }
-                        ]
-                    }
+            body_contents = [
+                {
+                    "type": "text",
+                    "text": display_title,
+                    "size": "md",
+                    "wrap": True,
+                    "weight": "bold"
                 }
-                bubbles.append(bubble)
+            ]
+            if price_text:
+                body_contents.append({
+                    "type": "text",
+                    "text": price_text,
+                    "size": "sm",
+                    "color": "#ff0000",
+                    "weight": "bold",
+                    "margin": "md"
+                })
 
-            flex_msg = {
-                "type": "flex",
-                "altText": f"城峰釣具店 新着通知 ({len(chunk)}件)",
-                "contents": {
-                    "type": "carousel",
-                    "contents": bubbles
+            bubble = {
+                "type": "bubble",
+                "body": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "contents": body_contents
+                },
+                "footer": {
+                    "type": "box",
+                    "layout": "vertical",
+                    "spacing": "sm",
+                    "contents": [
+                        {
+                            "type": "button",
+                            "style": "primary",
+                            "color": "#1DB954",
+                            "action": {
+                                "type": "uri",
+                                "label": "ページを開く",
+                                "uri": product_url
+                            }
+                        }
+                    ]
                 }
             }
-            messages_payload.append(flex_msg)
 
-    # 2. ブロググループの処理
-    if blog_items:
-        for i in range(0, len(blog_items), chunk_size):
-            chunk = blog_items[i:i + chunk_size]
-            bubbles = []
-            for title, product_url, img_url, item_key, price_text in chunk:
-                display_title = title.strip() if (title and title.strip()) else "ブログ更新情報"
-                display_img = img_url if img_url else DEFAULT_LOGO_URL
-
-                body_contents = [
-                    {
-                        "type": "text",
-                        "text": display_title,
-                        "size": "md",
-                        "wrap": True,
-                        "weight": "bold"
-                    },
-                    {
-                        "type": "text",
-                        "text": price_text,
-                        "size": "sm",
-                        "color": "#ff0000",
-                        "weight": "bold",
-                        "margin": "md"
-                    }
-                ]
-
-                bubble = {
-                    "type": "bubble",
-                    "hero": {
-                        "type": "image",
-                        "url": display_img,
-                        "size": "full",
-                        "aspectRatio": "2400:1800", 
-                        "aspectMode": "cover"
-                    },
-                    "body": {
-                        "type": "box",
-                        "layout": "vertical",
-                        "contents": body_contents
-                    },
-                    "footer": {
-                        "type": "box",
-                        "layout": "vertical",
-                        "spacing": "sm",
-                        "contents": [
-                            {
-                                "type": "button",
-                                "style": "primary",
-                                "color": "#1DB954",
-                                "action": {
-                                    "type": "uri",
-                                    "label": "ページを開く",
-                                    "uri": product_url
-                                }
-                            }
-                        ]
-                    }
+            if is_blog:
+                # ブログのカード：看板画像なし、ブログ用画像をHeroに設定
+                bubble["hero"] = {
+                    "type": "image",
+                    "url": display_img,
+                    "size": "full",
+                    "aspectRatio": "2400:1800",
+                    "aspectMode": "cover"
                 }
-                bubbles.append(bubble)
-
-            flex_msg = {
-                "type": "flex",
-                "altText": f"城峰釣具店 ブログ更新 ({len(chunk)}件)",
-                "contents": {
-                    "type": "carousel",
-                    "contents": bubbles
+            else:
+                # 商品のカード：最上段（ヘッダー）に看板画像、Heroに商品画像を設置
+                bubble["header"] = {
+                    "type": "box",
+                    "layout": "vertical",
+                    "paddingAll": "0px",
+                    "contents": [
+                        {
+                            "type": "image",
+                            "url": HEADER_BANNER_IMAGE_URL,
+                            "size": "full",
+                            "aspectRatio": "2400:1792",
+                            "aspectMode": "cover"
+                        }
+                    ]
                 }
+                bubble["hero"] = {
+                    "type": "image",
+                    "url": display_img,
+                    "size": "full",
+                    "aspectRatio": "4:3",
+                    "aspectMode": "cover"
+                }
+
+            bubbles.append(bubble)
+
+        flex_msg = {
+            "type": "flex",
+            "altText": f"城峰釣具店 新着通知 ({len(chunk)}件)",
+            "contents": {
+                "type": "carousel",
+                "contents": bubbles
             }
-            messages_payload.append(flex_msg)
+        }
+        messages_payload.append(flex_msg)
 
     if len(messages_payload) > 5:
         log("[WARN] メッセージ枠が5を超えるため、LINEの仕様に基づき分割送信します。")
