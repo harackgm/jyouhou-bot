@@ -267,7 +267,7 @@ def send_flex_message(items):
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
     }
     
-    # テストモードの判定（Trueなら管理者へpush、Falseなら全員へbroadcast）
+    # テストモードの判定
     api_endpoint = "https://api.line.me/v2/bot/message/push" if TEST_MODE else "https://api.line.me/v2/bot/message/broadcast"
 
     messages_payload = []
@@ -390,7 +390,6 @@ def send_flex_message(items):
                         "type": "image",
                         "url": display_img,
                         "size": "full",
-                        # ブログ用の新画像（完璧な4:3）に最適化
                         "aspectRatio": "2400:1800", 
                         "aspectMode": "cover"
                     },
