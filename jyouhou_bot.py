@@ -19,9 +19,12 @@ DB_PATH = "products.db"
 LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 
 # --- 【安全装置】テスト通知モード設定 ---
-# 本番と同じ動作をしつつ、指定した管理者のIDにのみ通知を送ります。確認後は False に戻してください。
+TEST_ADMIN_USER_ID = os.getenv("LINE_ADMIN_USER_ID")
+
+# ★テストモード（Trueで管理者のみに送信）
 TEST_MODE = True
-TEST_ADMIN_USER_ID = "Uxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" # ★ここをご自身のLINEユーザーIDに書き換えてください
+# ★強制デザイン確認モード（Trueでブログ1件と商品1件を強制通知）
+FORCE_DESIGN_TEST = True
 
 # --- 安全装置の設定 ---
 MAX_NOTIFY_LIMIT = 24  
@@ -257,6 +260,10 @@ def send_flex_message(items):
         log("[ERROR] LINE_CHANNEL_ACCESS_TOKEN が設定されていません。")
         return False
 
+    if TEST_MODE and not TEST_ADMIN_USER_ID:
+        log("[ERROR] テストモードですが GitHub Secrets に LINE_ADMIN_USER_ID が設定されていません。通知処理を中断します。")
+        return False
+
     is_recovery = get_system_status()
     
     blog_items = [item for item in items if item[4] == "ブログ最新記事"]
@@ -267,7 +274,6 @@ def send_flex_message(items):
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
     }
     
-    # テストモードの判定
     api_endpoint = "https://api.line.me/v2/bot/message/push" if TEST_MODE else "https://api.line.me/v2/bot/message/broadcast"
 
     messages_payload = []
@@ -476,6 +482,9 @@ def send_flex_message(items):
 def send_summary_message(new_items):
     if not LINE_ACCESS_TOKEN:
         return False
+        
+    if TEST_MODE and not TEST_ADMIN_USER_ID:
+        return False
     
     is_recovery = get_system_status()
     headers = {
@@ -516,6 +525,42 @@ def send_summary_message(new_items):
         return False
 
 def main():
+    # ==========================================
+    # ブログと商品の強制取得（デザインテスト用）
+    # ==========================================
+    if FORCE_DESIGN_TEST:
+        log("【テスト】デザイン確認のため、最新のブログ1件と商品1件を強制抽出して通知します。")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        combined_notify_list = []
+        
+        # ブログ1件を取得
+        blog_items = get_latest_blog_posts()
+        if blog_items:
+            b_title, b_url, b_key = blog_items[0]
+            combined_notify_list.append((f"【ブログ更新】 {b_title}", b_url, BLOG_DEFAULT_IMAGE_URL, b_key, "ブログ最新記事"))
+            
+        # 商品1件を取得
+        try:
+            response = requests.get(TARGET_URL, headers=headers, timeout=10)
+            response.encoding = response.apparent_encoding
+            soup = BeautifulSoup(response.text, "html.parser")
+            all_items = get_top_information_items(soup)
+            if all_items:
+                p_title, p_url, p_key = all_items[0]
+                img_url, price_text = fetch_product_details(p_url, headers)
+                combined_notify_list.append((p_title, p_url, img_url, p_key, price_text))
+        except Exception as e:
+            log(f"[ERROR] 強制テスト用商品取得エラー: {e}")
+            
+        if combined_notify_list:
+            send_flex_message(combined_notify_list)
+            log("【テスト完了】強制通知が完了しました。DBは更新されません。終わったら TEST_MODE と FORCE_DESIGN_TEST を False に戻してください。")
+        return
+
+    # （以下は本番用の通常処理・DB比較）
     current_hour = datetime.now(JST).hour
     if 0 <= current_hour < 8:
         log("深夜帯（0:00〜7:59）のため、サーバー負荷軽減と深夜通知防止のため監視をスキップします。")
@@ -527,9 +572,6 @@ def main():
     new_blogs_found = False
     blog_items_to_save = []
 
-    # ==========================================
-    # 1. ブログの確認
-    # ==========================================
     log("城峰釣具店ブログ (RSS監視) を開始します...")
     blog_items = get_latest_blog_posts()
     
@@ -559,9 +601,6 @@ def main():
             else:
                 log("[INFO] ブログの新しい記事はありませんでした。")
 
-    # ==========================================
-    # 2. 商品の確認
-    # ==========================================
     log("城峰釣具店 商品情報 (INFORMATION監視) を開始します...")
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -663,9 +702,6 @@ def main():
                     unique_next_snapshot.append(item)
                     seen_snap_keys.add(item[2])
 
-    # ==========================================
-    # 3. 通知の統合送信とDB保存
-    # ==========================================
     notify_success = True
     if combined_notify_list:
         if len(combined_notify_list) > MAX_NOTIFY_LIMIT:
