@@ -277,7 +277,6 @@ def send_flex_message(items):
             "text": "【システム通知】\n月間のLINE通信制限がリセットされたため、保留されていた新着情報をお届けします。"
         })
 
-    # ★ カルーセル1つあたりの最大表示数を 5 に変更しました
     chunk_size = 5
 
     # ブログと商品を分離して抽出
@@ -286,12 +285,8 @@ def send_flex_message(items):
 
     # 1. 商品グループの処理
     if product_items:
-        # 商品のカルーセルの直前に「独立した看板画像」を配置します
-        messages_payload.append({
-            "type": "image",
-            "originalContentUrl": HEADER_BANNER_IMAGE_URL,
-            "previewImageUrl": HEADER_BANNER_IMAGE_URL
-        })
+        # ★注意: ここにあった独立した汽車の画像送信コードを完全に削除しました
+        
         for i in range(0, len(product_items), chunk_size):
             chunk = product_items[i:i + chunk_size]
             bubbles = []
@@ -299,7 +294,7 @@ def send_flex_message(items):
                 display_title = title.strip() if (title and title.strip()) else "新着・再入荷情報"
                 display_img = img_url if img_url else DEFAULT_LOGO_URL
 
-                body_contents = [
+                body_texts = [
                     {
                         "type": "text",
                         "text": display_title,
@@ -309,7 +304,7 @@ def send_flex_message(items):
                     }
                 ]
                 if price_text:
-                    body_contents.append({
+                    body_texts.append({
                         "type": "text",
                         "text": price_text,
                         "size": "sm",
@@ -322,15 +317,31 @@ def send_flex_message(items):
                     "type": "bubble",
                     "hero": {
                         "type": "image",
-                        "url": display_img,
+                        "url": HEADER_BANNER_IMAGE_URL,
                         "size": "full",
-                        "aspectRatio": "4:3",
-                        "aspectMode": "cover"
+                        # ★修正: 汽車のバナーに合わせて横長の比率に設定し、ドアップを防ぎます
+                        "aspectRatio": "3:1",
+                        "aspectMode": "fit"
                     },
                     "body": {
                         "type": "box",
                         "layout": "vertical",
-                        "contents": body_contents
+                        "paddingAll": "0px",
+                        "contents": [
+                            {
+                                "type": "image",
+                                "url": display_img,
+                                "size": "full",
+                                "aspectRatio": "4:3",
+                                "aspectMode": "cover"
+                            },
+                            {
+                                "type": "box",
+                                "layout": "vertical",
+                                "paddingAll": "md",
+                                "contents": body_texts
+                            }
+                        ]
                     },
                     "footer": {
                         "type": "box",
@@ -371,7 +382,7 @@ def send_flex_message(items):
                 display_title = title.strip() if (title and title.strip()) else "ブログ更新情報"
                 display_img = img_url if img_url else DEFAULT_LOGO_URL
 
-                body_contents = [
+                body_texts = [
                     {
                         "type": "text",
                         "text": display_title,
@@ -401,7 +412,7 @@ def send_flex_message(items):
                     "body": {
                         "type": "box",
                         "layout": "vertical",
-                        "contents": body_contents
+                        "contents": body_texts
                     },
                     "footer": {
                         "type": "box",
