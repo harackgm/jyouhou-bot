@@ -21,9 +21,10 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 # --- 【安全装置】テスト通知モード設定 ---
 TEST_ADMIN_USER_ID = os.getenv("LINE_ADMIN_USER_ID")
 
-# ★本番運用のためFalseに変更（実際の更新検知時のみ、全員に通知）
-TEST_MODE = False
-FORCE_DESIGN_TEST = False
+# ★テストモード（Trueで管理者のみに送信）
+TEST_MODE = True
+# ★強制デザイン確認モード（Trueでブログ1件と商品1件を強制通知）
+FORCE_DESIGN_TEST = True
 
 # --- 安全装置の設定 ---
 MAX_NOTIFY_LIMIT = 24  
@@ -40,6 +41,13 @@ def generate_item_key(title, url):
     clean_title = re.sub(r'\s+', '', title)
     raw_str = f"{clean_title}_{url.strip()}"
     return hashlib.md5(raw_str.encode('utf-8')).hexdigest()
+
+# ★新規追加: 画像URLの末尾にタイムスタンプを付与してキャッシュを回避する関数
+def get_ts_url(url):
+    if not url:
+        return url
+    ts = int(datetime.now(JST).timestamp())
+    return f"{url}?t={ts}"
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -281,9 +289,11 @@ def send_flex_message(items):
 
     chunk_size = 5
 
-    # ブログと商品を分離して抽出
     blog_items = [item for item in items if item[4] == "ブログ最新記事"]
     product_items = [item for item in items if item[4] != "ブログ最新記事"]
+
+    # ★看板用バナーにタイムスタンプ付与
+    dynamic_header_banner = get_ts_url(HEADER_BANNER_IMAGE_URL)
 
     # 1. 商品グループの処理
     if product_items:
@@ -317,7 +327,7 @@ def send_flex_message(items):
                     "type": "bubble",
                     "hero": {
                         "type": "image",
-                        "url": HEADER_BANNER_IMAGE_URL,
+                        "url": dynamic_header_banner, # ★タイムスタンプ付き看板画像を使用
                         "size": "full",
                         "aspectRatio": "3:1",
                         "aspectMode": "fit"
@@ -546,11 +556,12 @@ def main():
         
         combined_notify_list = []
         
-        # ブログ1件を取得
+        # ブログ1件を取得（★タイムスタンプ付与）
         blog_items = get_latest_blog_posts()
         if blog_items:
             b_title, b_url, b_key = blog_items[0]
-            combined_notify_list.append((f"【ブログ更新】 {b_title}", b_url, BLOG_DEFAULT_IMAGE_URL, b_key, "ブログ最新記事"))
+            dyn_blog_img = get_ts_url(BLOG_DEFAULT_IMAGE_URL)
+            combined_notify_list.append((f"【ブログ更新】 {b_title}", b_url, dyn_blog_img, b_key, "ブログ最新記事"))
             
         # 商品1件を取得
         try:
@@ -561,6 +572,9 @@ def main():
             if all_items:
                 p_title, p_url, p_key = all_items[0]
                 img_url, price_text = fetch_product_details(p_url, headers)
+                # もし準備中画像に該当する場合はタイムスタンプ付与する
+                if img_url == PRE_ANNOUNCEMENT_IMAGE_URL:
+                    img_url = get_ts_url(PRE_ANNOUNCEMENT_IMAGE_URL)
                 combined_notify_list.append((p_title, p_url, img_url, p_key, price_text))
         except Exception as e:
             log(f"[ERROR] 強制テスト用商品取得エラー: {e}")
@@ -605,9 +619,10 @@ def main():
                 log(f"[INFO] ブログの新着を {len(new_blogs)}件 検知しました。")
                 for b_title, b_url, b_key in new_blogs:
                     display_title = f"【ブログ更新】 {b_title}"
-                    img_url = BLOG_DEFAULT_IMAGE_URL
+                    # ★タイムスタンプ付与
+                    dyn_blog_img = get_ts_url(BLOG_DEFAULT_IMAGE_URL)
                     price_text = "ブログ最新記事"
-                    combined_notify_list.append((display_title, b_url, img_url, b_key, price_text))
+                    combined_notify_list.append((display_title, b_url, dyn_blog_img, b_key, price_text))
             else:
                 log("[INFO] ブログの新しい記事はありませんでした。")
 
@@ -693,7 +708,8 @@ def main():
                     log(f"[INFO] 通知処理中: {title} (タイプ: {notify_type})")
                     if notify_type == 'pre_new':
                         display_title = f"【事前告知(写真待)】 {title}"
-                        img_url = PRE_ANNOUNCEMENT_IMAGE_URL
+                        # ★準備中画像にタイムスタンプ付与
+                        img_url = get_ts_url(PRE_ANNOUNCEMENT_IMAGE_URL)
                         price_text = "価格: 準備中"
                     elif notify_type == 'full_upgrade':
                         display_title = f"【本掲載開始！】 {title}"
