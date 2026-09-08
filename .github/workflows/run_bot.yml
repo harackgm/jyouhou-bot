@@ -1,10 +1,7 @@
 name: Jyouhou Tackle Watcher
 
 on:
-  schedule:
-    # JST(日本時間)で実行するため、UTC指定(JST-9時間)で記述します。※既存の設定があれば維持してください。
-    - cron: '*/10 * * * *'
-  workflow_dispatch:
+  workflow_dispatch: # 手動実行、または外部(cron-job.org等)からのAPI呼び出しトリガー
 
 jobs:
   check:
@@ -23,7 +20,7 @@ jobs:
       - name: Run bot
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
-          LINE_ADMIN_USER_ID: ${{ secrets.LINE_ADMIN_USER_ID }} # ★追加: テスト送信用のユーザーID
+          LINE_ADMIN_USER_ID: ${{ secrets.LINE_ADMIN_USER_ID }}
         run: python jyouhou_bot.py
         
       - name: Commit and push DB changes
