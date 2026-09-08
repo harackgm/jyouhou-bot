@@ -11,7 +11,6 @@ TARGET_URL = "https://fishing-shop-jh.com/"
 DEFAULT_LOGO_URL = "https://img07.shop-pro.jp/PA01332/799/PA01332799.png"
 PRE_ANNOUNCEMENT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Jzyunbi.jpg"
 BLOG_DEFAULT_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/Blog_img.png"
-# ★変更: 新しい画像「zyouhoum.png」に差し替えました
 HEADER_BANNER_IMAGE_URL = "https://raw.githubusercontent.com/harackgm/jyouhou-bot/main/zyouhoum.png"
 
 BLOG_RSS_URL = "https://rssblog.ameba.jp/jyouhou-since1957/rss20.xml"
@@ -22,8 +21,9 @@ LINE_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN")
 # --- 【安全装置】テスト通知モード設定 ---
 TEST_ADMIN_USER_ID = os.getenv("LINE_ADMIN_USER_ID")
 
-TEST_MODE = True
-FORCE_DESIGN_TEST = True
+# ★本番運用のためFalseに変更（実際の更新検知時のみ、全員に通知）
+TEST_MODE = False
+FORCE_DESIGN_TEST = False
 
 # --- 安全装置の設定 ---
 MAX_NOTIFY_LIMIT = 24  
@@ -268,6 +268,7 @@ def send_flex_message(items):
         "Content-Type": "application/json",
         "Authorization": f"Bearer {LINE_ACCESS_TOKEN.strip()}"
     }
+    
     api_endpoint = "https://api.line.me/v2/bot/message/push" if TEST_MODE else "https://api.line.me/v2/bot/message/broadcast"
 
     messages_payload = []
@@ -278,7 +279,6 @@ def send_flex_message(items):
             "text": "【システム通知】\n月間のLINE通信制限がリセットされたため、保留されていた新着情報をお届けします。"
         })
 
-    # カルーセル1通あたりの最大表示数を5に設定
     chunk_size = 5
 
     # ブログと商品を分離して抽出
