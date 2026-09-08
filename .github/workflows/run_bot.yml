@@ -1,7 +1,7 @@
 name: Jyouhou Tackle Watcher
 
 on:
-  workflow_dispatch: # 手動実行、または外部(cron-job.org等)からのAPI呼び出しトリガー
+  workflow_dispatch: # 外部Cronjob(cron-job.org等)からのAPI呼び出し、または手動実行のみ
 
 jobs:
   check:
